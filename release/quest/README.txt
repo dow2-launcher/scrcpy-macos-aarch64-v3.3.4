@@ -14,16 +14,24 @@ Run: double-click scrcpy-quest.command, or:
 Keys in the window (US layout positions, hold Shift for bigger steps):
 
     1 2 3 4   view preset A (wide) / B / C (tall) / D (full picture)
+    5         eyes: both (merged) / left only / right only
+    6         seam mode: auto / lock / fixed (straight vertical) / dynamic
+    7         recompute the seam (lock mode)
+    8 9       move the straight vertical seam left / right (switches to fixed)
     [ ]       rotation angle -/+ 0.1 degree
     - =       lens correction k1 -/+ 0.01
     ; '       lens correction k2 -/+ 0.01
     , .       eyes overlap -/+ 0.002
     \         toggle processing (raw buffer)
     /         toggle the text overlay
-    0         reset to the initial values
+    0         reset to the default values
 
-Starting values: --quest-angle=20.9 --quest-k1=-0.26 --quest-k2=-0.05
-                 --quest-ovfrac=0.844 --quest-preset=B
+The last values are saved to ~/.config/scrcpy-quest.conf and restored on the
+next run. The equivalent command line is printed on every change, e.g.:
+
+    ./scrcpy --quest --quest-angle=20.9 --quest-k1=-0.26 --quest-k2=-0.05
+             --quest-ovfrac=0.844 --quest-preset=B --quest-eye=both
+             --quest-seam=auto --quest-seam-x=0
 
 ---
 
@@ -40,10 +48,17 @@ Starting values: --quest-angle=20.9 --quest-k1=-0.26 --quest-k2=-0.05
 Клавиши в окне (по расположению английской раскладки, с Shift шаг крупнее):
 
     1 2 3 4   пресет обзора A (широкий) / B / C (вытянутый) / D (весь кадр)
+    5         глаза: оба (склейка) / только левый / только правый
+    6         режим шва: auto / lock / fixed (прямой вертикальный) / dynamic
+    7         пересчитать шов (режим lock)
+    8 9       сдвинуть прямой вертикальный шов влево / вправо (включает fixed)
     [ ]       угол поворота -/+ 0.1 градуса
     - =       распрямление k1 -/+ 0.01
     ; '       распрямление k2 -/+ 0.01
     , .       перекрытие глаз -/+ 0.002
     \         вкл/выкл обработку (сырой буфер)
     /         показать/скрыть строку значений
-    0         сброс к начальным значениям
+    0         сброс к значениям по умолчанию
+
+Последние значения сохраняются в ~/.config/scrcpy-quest.conf и подхватываются
+при следующем запуске; готовая командная строка печатается в терминал.

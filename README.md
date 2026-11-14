@@ -47,27 +47,53 @@ bigger steps.
 | Keys                         | Action                                                  |
 |------------------------------|---------------------------------------------------------|
 | <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> | View preset: A wide (~1.69:1), B (~1.13:1, default), C tall (~0.82:1), D full picture (black corners) |
+| <kbd>5</kbd>                 | Eyes: both (merged) → left eye only → right eye only (a single eye is lens-corrected and rotated, without merge, with its own presets) |
+| <kbd>6</kbd>                 | Seam mode: `auto` → `lock` → `fixed` → `dynamic` (see below) |
+| <kbd>7</kbd>                 | Recompute the seam now (useful in `lock` mode)          |
+| <kbd>8</kbd> <kbd>9</kbd>    | Straight vertical seam (`fixed`): move it left / right by ~2 px (~20 px with <kbd>Shift</kbd>) |
 | <kbd>[</kbd> <kbd>]</kbd>    | Rotation angle ∓0.1° (tilted horizon → adjust this)     |
 | <kbd>-</kbd> <kbd>=</kbd>    | Lens correction `k1` ∓0.01 (curved straight lines)      |
 | <kbd>;</kbd> <kbd>'</kbd>    | Lens correction `k2` ∓0.01                              |
 | <kbd>,</kbd> <kbd>.</kbd>    | Eyes overlap `ovfrac` ∓0.002 (doubled or torn seam)     |
 | <kbd>\</kbd>                | Toggle processing (show the raw buffer)                 |
 | <kbd>/</kbd>                 | Toggle the text overlay (current values)                |
-| <kbd>0</kbd>                 | Reset to the initial values                             |
+| <kbd>0</kbd>                 | Reset everything to the default values                  |
+
+Seam modes (the cut between the two eyes; `--quest-seam=…`):
+
+ - `auto` (default): optimal curved seam. It is kept as long as it is good and
+   replaced only when it has been clearly worse than a new one for a while, so
+   the picture no longer jumps on every frame.
+ - `lock`: the current seam is frozen (press <kbd>7</kbd> to recompute it).
+ - `fixed`: straight vertical cut, at the center of the overlap by default;
+   move it with <kbd>8</kbd> / <kbd>9</kbd> (or `--quest-seam-x=…`). Pressing
+   <kbd>8</kbd> or <kbd>9</kbd> switches to this mode.
+ - `dynamic`: optimal seam recomputed on every frame (the behavior of the
+   first version; the picture may jump).
+
+The overlay shows the eye mode, the seam mode and the seam position (`X`, in
+pixels of the merged picture).
+
+**The last values are remembered**: they are saved to
+`~/.config/scrcpy-quest.conf` on every change and restored on the next run
+(command line options take precedence; `--quest-no-config` disables this).
+On every change, the equivalent command line is also printed to the terminal.
 
 The usual scrcpy shortcuts (<kbd>MOD</kbd>+<kbd>f</kbd> fullscreen,
 <kbd>MOD</kbd>+<kbd>w</kbd> resize to fit…; <kbd>MOD</kbd> is <kbd>Alt</kbd> or
 <kbd>Cmd</kbd>) are unchanged. Mouse clicks and touches are not forwarded in
 this mode (the picture does not match the headset screen coordinates).
 
-Once you have found good values, pass them on the command line:
+The values can also be passed on the command line:
 
 ```bash
 ./scrcpy --quest --quest-angle=21.0 --quest-k1=-0.26 --quest-k2=-0.05 \
-         --quest-ovfrac=0.844 --quest-preset=B
+         --quest-ovfrac=0.844 --quest-preset=B --quest-eye=both \
+         --quest-seam=fixed --quest-seam-x=0
 ```
 
-Defaults: angle 20.9°, k1 −0.26, k2 −0.05, ovfrac 0.844, preset B.
+Defaults: angle 20.9°, k1 −0.26, k2 −0.05, ovfrac 0.844, preset B, both eyes,
+seam `auto`.
 
 ## Build
 
@@ -126,13 +152,37 @@ Quest 3 (два «рыбьих глаза» рядом, с наклоном па
 | Клавиши                      | Действие                                                |
 |------------------------------|---------------------------------------------------------|
 | <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> | Пресет обзора: A широкий (~1.69:1), B (~1.13:1, по умолчанию), C вытянутый (~0.82:1), D весь кадр (с чёрными углами) |
+| <kbd>5</kbd>                 | Глаза: оба (склейка) → только левый → только правый (один глаз распрямлён и повёрнут, без склейки, со своими пресетами) |
+| <kbd>6</kbd>                 | Режим шва: `auto` → `lock` → `fixed` → `dynamic` (см. ниже) |
+| <kbd>7</kbd>                 | Пересчитать шов сейчас (полезно в режиме `lock`)        |
+| <kbd>8</kbd> <kbd>9</kbd>    | Прямой вертикальный шов (`fixed`): сдвинуть влево / вправо на ~2 пикселя (с <kbd>Shift</kbd> — на ~20) |
 | <kbd>[</kbd> <kbd>]</kbd>    | Угол поворота ∓0.1° (завален горизонт — крутить его)    |
 | <kbd>-</kbd> <kbd>=</kbd>    | Распрямление `k1` ∓0.01 (прямые линии изогнуты)         |
 | <kbd>;</kbd> <kbd>'</kbd>    | Распрямление `k2` ∓0.01                                 |
 | <kbd>,</kbd> <kbd>.</kbd>    | Перекрытие глаз `ovfrac` ∓0.002 (шов двоит или расходится) |
 | <kbd>\</kbd>                | Вкл/выкл обработку (показать сырой буфер)               |
 | <kbd>/</kbd>                 | Показать/скрыть строку с текущими значениями            |
-| <kbd>0</kbd>                 | Сбросить к начальным значениям                          |
+| <kbd>0</kbd>                 | Сбросить всё к значениям по умолчанию                   |
+
+Режимы шва (линия стыка двух глаз; `--quest-seam=…`):
+
+ - `auto` (по умолчанию): оптимальный кривой шов. Держится, пока он хорош, и
+   заменяется, только если какое-то время был заметно хуже нового, поэтому
+   картинка больше не скачет на каждом кадре.
+ - `lock`: текущий шов заморожен (<kbd>7</kbd> — пересчитать).
+ - `fixed`: прямой вертикальный разрез, по умолчанию по центру перекрытия;
+   двигается клавишами <kbd>8</kbd> / <kbd>9</kbd> (или `--quest-seam-x=…`).
+   Нажатие <kbd>8</kbd> или <kbd>9</kbd> само включает этот режим.
+ - `dynamic`: оптимальный шов заново на каждом кадре (как в первой версии;
+   картинка может скакать).
+
+В строке значений видно режим глаз, режим шва и положение шва (`X`, в
+пикселях склеенного кадра).
+
+**Последние значения запоминаются**: при каждом изменении они сохраняются в
+`~/.config/scrcpy-quest.conf` и подхватываются при следующем запуске (опции
+командной строки главнее; `--quest-no-config` отключает это). При каждом
+изменении в терминал также печатается готовая командная строка.
 
 Обычные сочетания scrcpy (<kbd>MOD</kbd>+<kbd>f</kbd> — полный экран,
 <kbd>MOD</kbd>+<kbd>w</kbd> — подогнать окно…; <kbd>MOD</kbd> — это
@@ -140,14 +190,16 @@ Quest 3 (два «рыбьих глаза» рядом, с наклоном па
 режиме в шлем не передаются (картинка не совпадает с координатами экрана
 шлема).
 
-Подобранные значения можно задать при запуске:
+Значения можно задать и при запуске:
 
 ```bash
 ./scrcpy --quest --quest-angle=21.0 --quest-k1=-0.26 --quest-k2=-0.05 \
-         --quest-ovfrac=0.844 --quest-preset=B
+         --quest-ovfrac=0.844 --quest-preset=B --quest-eye=both \
+         --quest-seam=fixed --quest-seam-x=0
 ```
 
-По умолчанию: угол 20.9°, k1 −0.26, k2 −0.05, ovfrac 0.844, пресет B.
+По умолчанию: угол 20.9°, k1 −0.26, k2 −0.05, ovfrac 0.844, пресет B, оба
+глаза, шов `auto`.
 
 ---
 
