@@ -73,10 +73,14 @@ _scrcpy() {
         --push-target=
         --quest
         --quest-angle=
+        --quest-eye=
         --quest-k1=
         --quest-k2=
+        --quest-no-config
         --quest-ovfrac=
         --quest-preset=
+        --quest-seam=
+        --quest-seam-x=
         -r --record=
         --raw-key-events
         --record-format=
@@ -171,6 +175,18 @@ _scrcpy() {
             COMPREPLY=($(compgen -f -- "$cur"))
             return
             ;;
+        --quest-eye)
+            COMPREPLY=($(compgen -W 'both left right' -- "$cur"))
+            return
+            ;;
+        --quest-preset)
+            COMPREPLY=($(compgen -W 'A B C D' -- "$cur"))
+            return
+            ;;
+        --quest-seam)
+            COMPREPLY=($(compgen -W 'auto lock fixed dynamic' -- "$cur"))
+            return
+            ;;
         --record-format)
             COMPREPLY=($(compgen -W 'mp4 mkv m4a mka opus aac flac wav' -- "$cur"))
             return
@@ -214,6 +230,7 @@ _scrcpy() {
         |--quest-k1 \
         |--quest-k2 \
         |--quest-ovfrac \
+        |--quest-seam-x \
         |--rotation \
         |--screen-off-timeout \
         |--tunnel-host \

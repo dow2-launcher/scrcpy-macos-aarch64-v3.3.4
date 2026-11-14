@@ -469,7 +469,9 @@ Default is "/sdcard/Download/".
 .B \-\-quest
 Meta Quest viewing mode: turn the raw two\-eyes display buffer into a single flat picture (per\-eye lens correction, mirrored rotation, and merge of the two eyes along an optimal seam).
 
-The parameters can be adjusted live from the window: 1/2/3/4 select the view preset (A/B/C/D), [ and ] change the angle, \- and = change k1, ; and ' change k2, , and . change the overlap (hold Shift for bigger steps), \\ toggles the processing (raw buffer), / toggles the text overlay, 0 resets the initial values.
+The parameters can be adjusted live from the window: 1/2/3/4 select the view preset (A/B/C/D), 5 cycles the eyes (both, left only, right only), 6 cycles the seam modes (auto, lock, fixed, dynamic), 7 recomputes the seam, 8 and 9 move the fixed vertical seam to the left and to the right, [ and ] change the angle, \- and = change k1, ; and ' change k2, , and . change the overlap (hold Shift for bigger steps), \\ toggles the processing (raw buffer), / toggles the text overlay, 0 resets the default values.
+
+The last values are saved to ~/.config/scrcpy\-quest.conf and restored on the next run (the command line options take precedence). On every change, the equivalent command line is printed to the console.
 
 Mouse and touch events are not forwarded in this mode.
 
@@ -478,6 +480,14 @@ Mouse and touch events are not forwarded in this mode.
 Set the initial rotation angle of the eyes for \fB\-\-quest\fR (positive for the left eye, mirrored for the right eye).
 
 Default is 20.9.
+
+.TP
+.BI "\-\-quest\-eye " value
+Select the eyes to display for \fB\-\-quest\fR.
+
+Possible values are "both" (merge the two eyes), "left" and "right" (a single eye, lens\-corrected and rotated, without merge).
+
+Default is both.
 
 .TP
 .BI "\-\-quest\-k1 " value
@@ -492,6 +502,10 @@ Set the initial double quadratic lens correction coefficient for \fB\-\-quest\fR
 Default is \-0.05.
 
 .TP
+.B \-\-quest\-no\-config
+Do not load or save the \fB\-\-quest\fR parameters from/to the config file (~/.config/scrcpy\-quest.conf, or the path given by the environment variable SCRCPY_QUEST_CONFIG).
+
+.TP
 .BI "\-\-quest\-ovfrac " value
 Set the initial overlap between the two eyes for \fB\-\-quest\fR, as a fraction of the eye width (between 0.5 and 0.98).
 
@@ -504,6 +518,20 @@ Set the initial view preset for \fB\-\-quest\fR.
 Possible values are "A" (wide), "B", "C" (tall) and "D" (full picture).
 
 Default is B.
+
+.TP
+.BI "\-\-quest\-seam " mode
+Set the seam mode for \fB\-\-quest\fR (how the cut between the two eyes is chosen).
+
+Possible values are "auto" (optimal curved seam, replaced only when it becomes clearly worse than a new one for some time, so that the picture does not jump), "lock" (the optimal seam is frozen until recomputed by pressing 7), "fixed" (straight vertical cut, which can be moved with 8 and 9 or \-\-quest\-seam\-x) and "dynamic" (optimal seam recomputed on every frame, the picture may jump).
+
+Default is auto.
+
+.TP
+.BI "\-\-quest\-seam\-x " value
+Set the position of the straight vertical seam (\-\-quest\-seam=fixed), relative to the center of the overlap, as a fraction of the eye width (between \-0.5 and 0.5, negative to move it to the left).
+
+Default is 0 (center of the overlap).
 
 .TP
 .BI "\-r, \-\-record " file

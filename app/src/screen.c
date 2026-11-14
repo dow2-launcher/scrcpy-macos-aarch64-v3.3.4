@@ -434,7 +434,8 @@ sc_screen_init(struct sc_screen *screen,
     screen->quest_enabled = false;
     screen->quest_refresh_pending = false;
     if (params->video && params->quest) {
-        if (!sc_quest_init(&screen->quest, &params->quest_params)) {
+        if (!sc_quest_init(&screen->quest, &params->quest_params,
+                           params->quest_set, params->quest_config)) {
             av_frame_free(&screen->frame);
             goto error_destroy_display;
         }
@@ -885,6 +886,10 @@ sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
     switch (event->type) {
         case SC_EVENT_QUEST_REFRESH: {
             screen->quest_refresh_pending = false;
+            if (screen->quest_enabled) {
+                // Remember the last values (once per burst of key events)
+                sc_quest_save_config(&screen->quest);
+            }
             if (screen->quest_enabled && screen->has_frame) {
                 // Reprocess the current frame with the new parameters
                 bool ok = sc_screen_apply_frame(screen, false);

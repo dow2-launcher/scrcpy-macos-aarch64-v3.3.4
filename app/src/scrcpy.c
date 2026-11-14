@@ -826,6 +826,8 @@ aoa_complete:
             .start_fps_counter = options->start_fps_counter,
             .quest = options->quest,
             .quest_params = options->quest_params,
+            .quest_set = options->quest_set,
+            .quest_config = options->quest_config,
         };
 
         if (!sc_screen_init(&s->screen, &screen_params)) {

@@ -120,6 +120,10 @@ enum {
     OPT_QUEST_K2,
     OPT_QUEST_OVFRAC,
     OPT_QUEST_PRESET,
+    OPT_QUEST_EYE,
+    OPT_QUEST_SEAM,
+    OPT_QUEST_NO_CONFIG,
+    OPT_QUEST_SEAM_X,
 };
 
 struct sc_option {
@@ -809,12 +813,61 @@ static const struct sc_option options[] = {
                 "mirrored rotation, and merge of the two eyes along an optimal "
                 "seam).\n"
                 "The parameters can be adjusted live from the window: 1/2/3/4 "
-                "select the view preset (A/B/C/D), [ and ] change the angle, "
-                "- and = change k1, ; and ' change k2, , and . change the "
-                "overlap (hold Shift for bigger steps), \\ toggles the "
-                "processing (raw buffer), / toggles the text overlay, 0 "
-                "resets the initial values.\n"
+                "select the view preset (A/B/C/D), 5 cycles the eyes (both, "
+                "left only, right only), 6 cycles the seam modes (auto, lock, "
+                "fixed, dynamic), 7 recomputes the seam, 8 and 9 move the "
+                "fixed vertical seam to the left and to the right, [ and ] "
+                "change the angle, - and = change k1, ; and "
+                "' change k2, , and . change the overlap (hold Shift for "
+                "bigger steps), \\ toggles the processing (raw buffer), / "
+                "toggles the text overlay, 0 resets the default values.\n"
+                "The last values are saved to ~/.config/scrcpy-quest.conf "
+                "and restored on the next run (the command line options take "
+                "precedence). On every change, the equivalent command line is "
+                "printed to the console.\n"
                 "Mouse and touch events are not forwarded in this mode.",
+    },
+    {
+        .longopt_id = OPT_QUEST_EYE,
+        .longopt = "quest-eye",
+        .argdesc = "value",
+        .text = "Select the eyes to display for --quest.\n"
+                "Possible values are \"both\" (merge the two eyes), \"left\" "
+                "and \"right\" (a single eye, lens-corrected and rotated, "
+                "without merge).\n"
+                "Default is both.",
+    },
+    {
+        .longopt_id = OPT_QUEST_NO_CONFIG,
+        .longopt = "quest-no-config",
+        .text = "Do not load or save the --quest parameters from/to the "
+                "config file (~/.config/scrcpy-quest.conf, or the path given "
+                "by the environment variable SCRCPY_QUEST_CONFIG).",
+    },
+    {
+        .longopt_id = OPT_QUEST_SEAM,
+        .longopt = "quest-seam",
+        .argdesc = "mode",
+        .text = "Set the seam mode for --quest (how the cut between the two "
+                "eyes is chosen).\n"
+                "Possible values are \"auto\" (optimal curved seam, replaced "
+                "only when it becomes clearly worse than a new one for some "
+                "time, so that the picture does not jump), \"lock\" (the "
+                "optimal seam is frozen until recomputed by pressing 7), "
+                "\"fixed\" (straight vertical cut, which can be moved with 8 "
+                "and 9 or --quest-seam-x) and \"dynamic\" (optimal seam "
+                "recomputed on every frame, the picture may jump).\n"
+                "Default is auto.",
+    },
+    {
+        .longopt_id = OPT_QUEST_SEAM_X,
+        .longopt = "quest-seam-x",
+        .argdesc = "value",
+        .text = "Set the position of the straight vertical seam "
+                "(--quest-seam=fixed), relative to the center of the overlap, "
+                "as a fraction of the eye width (between -0.5 and 0.5, "
+                "negative to move it to the left).\n"
+                "Default is 0 (center of the overlap).",
     },
     {
         .longopt_id = OPT_QUEST_ANGLE,
@@ -1649,6 +1702,49 @@ parse_quest_preset(const char *s, enum sc_quest_preset *preset) {
     }
 
     LOGE("Unsupported quest preset: %s (expected A, B, C or D)", s);
+    return false;
+}
+
+static bool
+parse_quest_eye(const char *s, enum sc_quest_eye *eye) {
+    if (!strcmp(s, "both")) {
+        *eye = SC_QUEST_EYE_BOTH;
+        return true;
+    }
+    if (!strcmp(s, "left")) {
+        *eye = SC_QUEST_EYE_LEFT;
+        return true;
+    }
+    if (!strcmp(s, "right")) {
+        *eye = SC_QUEST_EYE_RIGHT;
+        return true;
+    }
+
+    LOGE("Unsupported quest eye: %s (expected both, left or right)", s);
+    return false;
+}
+
+static bool
+parse_quest_seam(const char *s, enum sc_quest_seam *seam) {
+    if (!strcmp(s, "auto")) {
+        *seam = SC_QUEST_SEAM_AUTO;
+        return true;
+    }
+    if (!strcmp(s, "lock")) {
+        *seam = SC_QUEST_SEAM_LOCK;
+        return true;
+    }
+    if (!strcmp(s, "fixed")) {
+        *seam = SC_QUEST_SEAM_FIXED;
+        return true;
+    }
+    if (!strcmp(s, "dynamic")) {
+        *seam = SC_QUEST_SEAM_DYNAMIC;
+        return true;
+    }
+
+    LOGE("Unsupported quest seam mode: %s (expected auto, lock, fixed or "
+         "dynamic)", s);
     return false;
 }
 
@@ -2659,6 +2755,7 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                                      45, "quest angle")) {
                     return false;
                 }
+                opts->quest_set |= SC_QUEST_SET_ANGLE;
                 opts->quest = true;
                 break;
             case OPT_QUEST_K1:
@@ -2666,6 +2763,7 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                                      "quest k1")) {
                     return false;
                 }
+                opts->quest_set |= SC_QUEST_SET_K1;
                 opts->quest = true;
                 break;
             case OPT_QUEST_K2:
@@ -2673,6 +2771,7 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                                      "quest k2")) {
                     return false;
                 }
+                opts->quest_set |= SC_QUEST_SET_K2;
                 opts->quest = true;
                 break;
             case OPT_QUEST_OVFRAC:
@@ -2680,13 +2779,40 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                                      0.98f, "quest ovfrac")) {
                     return false;
                 }
+                opts->quest_set |= SC_QUEST_SET_OVFRAC;
                 opts->quest = true;
                 break;
             case OPT_QUEST_PRESET:
                 if (!parse_quest_preset(optarg, &opts->quest_params.preset)) {
                     return false;
                 }
+                opts->quest_set |= SC_QUEST_SET_PRESET;
                 opts->quest = true;
+                break;
+            case OPT_QUEST_EYE:
+                if (!parse_quest_eye(optarg, &opts->quest_params.eye)) {
+                    return false;
+                }
+                opts->quest_set |= SC_QUEST_SET_EYE;
+                opts->quest = true;
+                break;
+            case OPT_QUEST_SEAM:
+                if (!parse_quest_seam(optarg, &opts->quest_params.seam)) {
+                    return false;
+                }
+                opts->quest_set |= SC_QUEST_SET_SEAM;
+                opts->quest = true;
+                break;
+            case OPT_QUEST_SEAM_X:
+                if (!parse_float_arg(optarg, &opts->quest_params.seam_x,
+                                     -0.5f, 0.5f, "quest seam x")) {
+                    return false;
+                }
+                opts->quest_set |= SC_QUEST_SET_SEAM_X;
+                opts->quest = true;
+                break;
+            case OPT_QUEST_NO_CONFIG:
+                opts->quest_config = false;
                 break;
             case OPT_PREFER_TEXT:
                 if (opts->key_inject_mode != SC_KEY_INJECT_MODE_MIXED) {
