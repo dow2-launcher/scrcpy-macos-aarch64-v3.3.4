@@ -105,6 +105,24 @@ jobs:
             shasum -a 256 "$name.zip"
             echo "name=$name" >> "$GITHUB_OUTPUT"
 
+      # Informative only: measure the Quest processing duration on this
+      # runner (4128x2208 input, QUEST_BENCH output in the logs)
+      - name: Benchmark
+        continue-on-error: true
+        run: |
+            set -ex
+            deps="$PWD/app/deps/work/install/macos-native-static"
+            build="release/work/build-macos-${{ matrix.arch }}"
+            export PKG_CONFIG_PATH="$deps/lib/pkgconfig"
+            cc -O3 -std=c11 -DSDL_MAIN_HANDLED -DSC_TEST \
+                -Iapp/src -I"$build/app" -I"$deps/include" \
+                app/tests/test_quest.c app/src/quest.c app/src/compat.c \
+                app/src/util/log.c app/src/util/thread.c app/src/util/tick.c \
+                $(pkg-config --static --cflags --libs sdl2 libavutil) \
+                -o "$build/test_quest"
+            sysctl -n machdep.cpu.brand_string hw.ncpu
+            QUEST_BENCH=1 "$build/test_quest" | grep -E '^(preset|bench)'
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
