@@ -1,0 +1,154 @@
+name: macOS (Quest)
+
+on:
+  push:
+    branches:
+      - quest
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  SERVER_URL: https://github.com/Genymobile/scrcpy/releases/download/v3.3.4/scrcpy-server-v3.3.4
+  # From the upstream v3.3.4 release (SHA256SUMS.txt and install_release.sh)
+  SERVER_SHA256: 8588238c9a5a00aa542906b6ec7e6d5541d9ffb9b5d0f6e1bc0e365e2303079e
+
+jobs:
+  test-client:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y meson ninja-build nasm ffmpeg libsdl2-2.0-0 \
+             libsdl2-dev libavcodec-dev libavdevice-dev libavformat-dev \
+             libavutil-dev libswresample-dev libusb-1.0-0 libusb-1.0-0-dev \
+             libv4l-dev
+
+      - name: Test
+        run: release/test_client.sh
+
+  build-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            uname: arm64
+            runner: macos-latest
+          - arch: x86_64
+            uname: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Check architecture
+        run: |
+            arch=$(uname -m)
+            if [[ "$arch" != "${{ matrix.uname }}" ]]
+            then
+                echo "Unexpected architecture: $arch" >&2
+                exit 1
+            fi
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+            for pkg in meson nasm libiconv zlib automake autoconf libtool
+            do
+                brew list "$pkg" &>/dev/null || brew install "$pkg"
+            done
+
+      - name: Build
+        env:
+          MACOSX_DEPLOYMENT_TARGET: 10.13
+        run: release/build_macos.sh ${{ matrix.arch }}
+
+      - name: Package
+        id: package
+        run: |
+            set -ex
+            name="scrcpy-quest-macos-${{ matrix.arch }}-${GITHUB_SHA::7}"
+            dist="release/work/build-macos-${{ matrix.arch }}/dist"
+            out="release/output"
+            mkdir -p "$out/$name"
+            cp -R "$dist"/. "$out/$name/"
+
+            # Bundle the official (unmodified) scrcpy-server
+            curl -fL --retry 3 -o "$out/$name/scrcpy-server" "$SERVER_URL"
+            echo "$SERVER_SHA256  $out/$name/scrcpy-server" | shasum -a 256 -c
+
+            cp release/quest/scrcpy-quest.command release/quest/README.txt \
+               "$out/$name/"
+            chmod +x "$out/$name/scrcpy" "$out/$name/adb" \
+                     "$out/$name/scrcpy-quest.command"
+
+            # Ad-hoc signature (mandatory on arm64)
+            codesign --force -s - "$out/$name/scrcpy"
+            codesign -dv "$out/$name/scrcpy"
+            codesign -v "$out/$name/scrcpy"
+            codesign -v "$out/$name/adb"
+
+            file "$out/$name/scrcpy"
+            otool -L "$out/$name/scrcpy"
+            "$out/$name/scrcpy" --version
+            "$out/$name/scrcpy" --help | grep -A3 -- '--quest'
+            ls -l "$out/$name"
+
+            # Keep permissions (upload-artifact does not preserve them)
+            cd "$out"
+            zip -r -y "$name.zip" "$name"
+            shasum -a 256 "$name.zip"
+            echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: release/output/${{ steps.package.outputs.name }}.zip
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs:
+      - test-client
+      - build-macos
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+            set -ex
+            cd artifacts
+            ls -l
+            shasum -a 256 *.zip > SHA256SUMS.txt
+            cat SHA256SUMS.txt
+            cat > notes.md <<NOTES
+            scrcpy v3.3.4 with the Meta Quest 3 viewing mode (\`--quest\`).
+
+            Unzip, then (the binaries are not notarized by Apple):
+
+                xattr -dr com.apple.quarantine scrcpy-quest-macos-*
+                cd scrcpy-quest-macos-*
+                ./scrcpy --quest --no-audio
+
+            See the [README](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/README.md) for the keys.
+            NOTES
+            gh release create "$GITHUB_REF_NAME" \
+                --repo "$GITHUB_REPOSITORY" \
+                --title "scrcpy-quest $GITHUB_REF_NAME" \
+                --notes-file notes.md \
+                *.zip SHA256SUMS.txt
