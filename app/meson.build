@@ -31,6 +31,7 @@ src = [
     'src/receiver.c',
     'src/recorder.c',
     'src/scrcpy.c',
+    'src/quest.c',
     'src/screen.c',
     'src/server.c',
     'src/version.c',
@@ -119,6 +120,9 @@ dependencies = [
     dependency('libswresample', static: static),
     dependency('sdl2', version: '>= 2.0.5', static: static),
 ]
+
+# libm is necessary for the Meta Quest viewing mode
+dependencies += cc.find_library('m', required: false)
 
 if v4l2_support
     dependencies += dependency('libavdevice', static: static)
@@ -247,6 +251,13 @@ if get_option('buildtype') == 'debug'
         ['test_device_msg_deserialize', [
             'tests/test_device_msg_deserialize.c',
             'src/device_msg.c',
+        ]],
+        ['test_quest', [
+            'tests/test_quest.c',
+            'src/quest.c',
+            'src/util/log.c',
+            'src/util/thread.c',
+            'src/util/tick.c',
         ]],
         ['test_orientation', [
             'tests/test_orientation.c',

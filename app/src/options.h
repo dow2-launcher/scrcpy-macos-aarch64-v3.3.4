@@ -227,6 +227,22 @@ struct sc_port_range {
 
 #define SC_WINDOW_POSITION_UNDEFINED (-0x8000)
 
+enum sc_quest_preset {
+    SC_QUEST_PRESET_A, // wide
+    SC_QUEST_PRESET_B,
+    SC_QUEST_PRESET_C, // tall
+    SC_QUEST_PRESET_D, // full picture
+};
+
+// Parameters of the Meta Quest viewing mode (--quest)
+struct sc_quest_params {
+    float angle; // panel rotation, in degrees (mirrored for the right eye)
+    float k1; // lens correction, quadratic coefficient
+    float k2; // lens correction, double quadratic coefficient
+    float ovfrac; // overlap between the two eyes, as a fraction of eye width
+    enum sc_quest_preset preset;
+};
+
 struct scrcpy_options {
     const char *serial;
     const char *crop;
@@ -327,6 +343,8 @@ struct scrcpy_options {
     const char *start_app;
     bool vd_destroy_content;
     bool vd_system_decorations;
+    bool quest;
+    struct sc_quest_params quest_params;
 };
 
 extern const struct scrcpy_options scrcpy_options_default;
