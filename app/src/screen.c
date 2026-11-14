@@ -1,6 +1,7 @@
 #include "screen.h"
 
 #include <assert.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <SDL2/SDL.h>
@@ -558,12 +559,25 @@ resize_for_content(struct sc_screen *screen, struct sc_size old_content_size,
     assert(screen->video);
 
     struct sc_size window_size = get_window_size(screen);
-    struct sc_size target_size = {
-        .width = (uint32_t) window_size.width * new_content_size.width
-                / old_content_size.width,
-        .height = (uint32_t) window_size.height * new_content_size.height
-                / old_content_size.height,
-    };
+    struct sc_size target_size;
+    if (screen->quest_enabled) {
+        // The content size changes when the view preset or the processing
+        // parameters change: keep the window area (scaling the window like the
+        // content would make it smaller and smaller every time it is limited
+        // by the display bounds)
+        double scale = sqrt((double) window_size.width * window_size.height
+                            / ((double) new_content_size.width
+                                      * new_content_size.height));
+        double w = new_content_size.width * scale;
+        double h = new_content_size.height * scale;
+        target_size.width = (uint16_t) MIN(w + .5, 0xFFFF);
+        target_size.height = (uint16_t) MIN(h + .5, 0xFFFF);
+    } else {
+        target_size.width = (uint32_t) window_size.width
+                          * new_content_size.width / old_content_size.width;
+        target_size.height = (uint32_t) window_size.height
+                           * new_content_size.height / old_content_size.height;
+    }
     target_size = get_optimal_size(target_size, new_content_size, true);
     set_window_size(screen, target_size);
 }

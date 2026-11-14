@@ -182,8 +182,8 @@ sc_display_render_overlay(struct sc_display *display,
         return;
     }
 
-    // Integer scale so that the overlay takes at most ~60% of the width
-    int scale = ow * 3 / (display->overlay_width * 5);
+    // Integer scale so that the overlay takes at most ~80% of the width
+    int scale = ow * 4 / (display->overlay_width * 5);
     if (scale < 1) {
         scale = 1;
     } else if (scale > 4) {
