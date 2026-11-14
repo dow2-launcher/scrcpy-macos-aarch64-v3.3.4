@@ -4,6 +4,7 @@
 #include "common.h"
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <libavutil/frame.h>
 #include <SDL2/SDL_scancode.h>
@@ -24,7 +25,10 @@
 //     filter, parameters k1 and k2);
 //  2. mirrored rotation (+angle for the left eye, -angle for the right eye);
 //  3. merge of the two eyes with an overlap (ovfrac), along an optimal seam
-//     computed by dynamic programming (hard cut, no feathering);
+//     computed by dynamic programming (hard cut, no feathering). By default,
+//     the seam is kept as long as possible, because the picture "jumps"
+//     whenever it moves (the two eyes do not see close objects at the same
+//     position). Alternatively, a single eye may be displayed, without merge;
 //  4. crop to a view preset (A/B/C/D).
 //
 // Everything is done directly on the YUV420P planes (bilinear sampling with
@@ -49,7 +53,7 @@ struct sc_quest_pool {
 
 struct sc_quest {
     struct sc_quest_params params;
-    struct sc_quest_params initial_params;
+    char *config_path; // may be NULL
     bool processing; // if false, frames are returned unchanged (raw buffer)
     bool overlay; // show the text overlay
     bool overlay_dirty;
@@ -89,7 +93,12 @@ struct sc_quest {
     uint8_t *seam_diff; // low resolution |left - right|
     int low_w;
     int low_h;
-    bool seam_low_valid;
+    int *seam_candidate; // candidate seam at low resolution
+    bool seam_valid; // the current seam matches the current geometry
+    bool seam_relock; // recompute the seam on the next frame
+    unsigned seam_counter; // frames since the last seam evaluation
+    unsigned seam_bad; // consecutive evaluations where the seam was bad
+    sc_tick seam_date; // date of the last seam change
 
     AVFrame *out;
 
@@ -101,8 +110,27 @@ struct sc_quest {
     sc_tick overlay_date;
 };
 
+// The parameters not set explicitly (cli_set is a OR of SC_QUEST_SET_*) are
+// loaded from the config file (if use_config is set)
 bool
-sc_quest_init(struct sc_quest *q, const struct sc_quest_params *params);
+sc_quest_init(struct sc_quest *q, const struct sc_quest_params *params,
+              uint8_t cli_set, bool use_config);
+
+// Save the current parameters to the config file (if enabled)
+void
+sc_quest_save_config(struct sc_quest *q);
+
+// Read the parameters present in the file (the others are left unchanged)
+bool
+sc_quest_config_load(const char *path, struct sc_quest_params *params);
+
+bool
+sc_quest_config_save(const char *path, const struct sc_quest_params *params);
+
+// Write the command line equivalent to the parameters
+void
+sc_quest_format_cli(const struct sc_quest_params *params, char *buf,
+                    size_t size);
 
 void
 sc_quest_destroy(struct sc_quest *q);

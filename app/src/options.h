@@ -234,6 +234,45 @@ enum sc_quest_preset {
     SC_QUEST_PRESET_D, // full picture
 };
 
+enum sc_quest_eye {
+    SC_QUEST_EYE_BOTH, // merge the two eyes
+    SC_QUEST_EYE_LEFT, // left eye only
+    SC_QUEST_EYE_RIGHT, // right eye only
+};
+
+enum sc_quest_seam {
+    // Optimal seam (dynamic programming), kept as long as it is good: it is
+    // replaced only when it becomes clearly worse than a new one for some time
+    SC_QUEST_SEAM_AUTO,
+    // Freeze the current optimal seam until explicitly recomputed
+    SC_QUEST_SEAM_LOCK,
+    // Straight vertical cut, at a configurable position (seam_x)
+    SC_QUEST_SEAM_FIXED,
+    // Compute the optimal seam on every frame (the picture may "jump")
+    SC_QUEST_SEAM_DYNAMIC,
+};
+
+// Flags to track which parameters have been set explicitly
+#define SC_QUEST_SET_ANGLE 0x1
+#define SC_QUEST_SET_K1 0x2
+#define SC_QUEST_SET_K2 0x4
+#define SC_QUEST_SET_OVFRAC 0x8
+#define SC_QUEST_SET_PRESET 0x10
+#define SC_QUEST_SET_EYE 0x20
+#define SC_QUEST_SET_SEAM 0x40
+#define SC_QUEST_SET_SEAM_X 0x80
+
+#define SC_QUEST_PARAMS_DEFAULT { \
+    .angle = 20.9f, \
+    .k1 = -0.26f, \
+    .k2 = -0.05f, \
+    .ovfrac = 0.844f, \
+    .preset = SC_QUEST_PRESET_B, \
+    .eye = SC_QUEST_EYE_BOTH, \
+    .seam = SC_QUEST_SEAM_AUTO, \
+    .seam_x = 0.f, \
+}
+
 // Parameters of the Meta Quest viewing mode (--quest)
 struct sc_quest_params {
     float angle; // panel rotation, in degrees (mirrored for the right eye)
@@ -241,6 +280,11 @@ struct sc_quest_params {
     float k2; // lens correction, double quadratic coefficient
     float ovfrac; // overlap between the two eyes, as a fraction of eye width
     enum sc_quest_preset preset;
+    enum sc_quest_eye eye;
+    enum sc_quest_seam seam;
+    // Position of the fixed seam, relative to the center of the overlap, as a
+    // fraction of the eye width (negative to move it to the left)
+    float seam_x;
 };
 
 struct scrcpy_options {
@@ -345,6 +389,8 @@ struct scrcpy_options {
     bool vd_system_decorations;
     bool quest;
     struct sc_quest_params quest_params;
+    uint8_t quest_set; // OR of SC_QUEST_SET_* (set on the command line)
+    bool quest_config; // load/save the parameters from/to the config file
 };
 
 extern const struct scrcpy_options scrcpy_options_default;

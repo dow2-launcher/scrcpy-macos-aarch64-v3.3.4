@@ -89,7 +89,7 @@ static void test_identity_merge(void) {
     };
 
     struct sc_quest q;
-    bool ok = sc_quest_init(&q, &params);
+    bool ok = sc_quest_init(&q, &params, 0, false);
     assert(ok);
     (void) ok;
 
@@ -127,6 +127,58 @@ static void test_identity_merge(void) {
         }
     }
 
+    // A single eye, without merge
+    sc_quest_handle_key(&q, SDL_SCANCODE_5, false);
+    assert(q.params.eye == SC_QUEST_EYE_LEFT);
+    out = sc_quest_process(&q, in);
+    assert(out && out->width == ew && out->height == SRC_H);
+    for (int y = 0; y < SRC_H - 1; ++y) {
+        const uint8_t *row = out->data[0] + (size_t) y * out->linesize[0];
+        for (int x = 0; x < ew - 1; ++x) {
+            assert(row[x] == pano_y(x, y));
+        }
+    }
+    sc_quest_handle_key(&q, SDL_SCANCODE_5, false);
+    assert(q.params.eye == SC_QUEST_EYE_RIGHT);
+    out = sc_quest_process(&q, in);
+    assert(out && out->width == ew && out->height == SRC_H);
+    for (int y = 0; y < SRC_H - 1; ++y) {
+        const uint8_t *row = out->data[0] + (size_t) y * out->linesize[0];
+        for (int x = 0; x < ew - 1; ++x) {
+            assert(row[x] == pano_y(x + off, y));
+        }
+    }
+    for (int cy = 0; cy < SRC_H / 2 - 1; ++cy) {
+        const uint8_t *row_u = out->data[1] + (size_t) cy * out->linesize[1];
+        for (int cx = 0; cx < ew / 2 - 1; ++cx) {
+            assert(row_u[cx] == pano_u(cx + off / 2, cy));
+        }
+    }
+    sc_quest_handle_key(&q, SDL_SCANCODE_5, false);
+    assert(q.params.eye == SC_QUEST_EYE_BOTH);
+
+    // Fixed vertical seam, moved to the left then far to the right
+    sc_quest_handle_key(&q, SDL_SCANCODE_8, false);
+    assert(q.params.seam == SC_QUEST_SEAM_FIXED);
+    out = sc_quest_process(&q, in);
+    assert(out && out->width == out_w);
+    int seam_x = q.seam[0];
+    assert(seam_x == ov / 2 - 2); // -0.001 * 2064
+    for (int y = 0; y < SRC_H; ++y) {
+        assert(q.seam[y] == seam_x);
+    }
+    for (int i = 0; i < 60; ++i) {
+        sc_quest_handle_key(&q, SDL_SCANCODE_9, true);
+    }
+    out = sc_quest_process(&q, in);
+    assert(q.seam[SRC_H / 2] == ov - 1); // clamped to the overlap
+    for (int y = 0; y < SRC_H - 1; y += 7) {
+        const uint8_t *row = out->data[0] + (size_t) y * out->linesize[0];
+        for (int x = 0; x < out_w - 1; ++x) {
+            assert(row[x] == pano_y(x, y));
+        }
+    }
+
     // Disable the processing
     bool changed = sc_quest_handle_key(&q, SDL_SCANCODE_BACKSLASH, false);
     assert(changed);
@@ -142,7 +194,7 @@ static void test_identity_merge(void) {
 
 static void test_presets_and_keys(void) {
     struct sc_quest q;
-    bool ok = sc_quest_init(&q, &default_params);
+    bool ok = sc_quest_init(&q, &default_params, 0, false);
     assert(ok);
     (void) ok;
 
@@ -187,8 +239,33 @@ static void test_presets_and_keys(void) {
     // the merged picture is wider if the overlap is smaller
     assert(out->width > 2386);
 
+    // Single eye presets (eye: 2064x2208)
+    static const struct {
+        SDL_Scancode key;
+        int w;
+        int h;
+    } eye_expected[] = {
+        {SDL_SCANCODE_1, 1568, 882},
+        {SDL_SCANCODE_2, 1568, 1412},
+        {SDL_SCANCODE_3, 1238, 1854},
+        {SDL_SCANCODE_4, 2064, 2208},
+    };
+    sc_quest_handle_key(&q, SDL_SCANCODE_0, false);
+    sc_quest_handle_key(&q, SDL_SCANCODE_5, false);
+    for (size_t i = 0; i < 4; ++i) {
+        sc_quest_handle_key(&q, eye_expected[i].key, false);
+        out = sc_quest_process(&q, in);
+        assert(out && out != in);
+        printf("left eye preset %c: %dx%d\n", (char) ('A' + i), out->width,
+               out->height);
+        assert(out->width == eye_expected[i].w);
+        assert(out->height == eye_expected[i].h);
+    }
+
     // Reset
     sc_quest_handle_key(&q, SDL_SCANCODE_0, false);
+    assert(q.params.eye == SC_QUEST_EYE_BOTH);
+    assert(q.params.seam == SC_QUEST_SEAM_AUTO);
     assert(q.params.angle == default_params.angle);
     assert(q.params.preset == SC_QUEST_PRESET_B);
 
@@ -235,13 +312,104 @@ write_ppm(const char *path, const AVFrame *f) {
     fclose(file);
 }
 
+static uint32_t
+next_random(uint32_t *state) {
+    *state = *state * 1664525 + 1013904223;
+    return *state >> 16;
+}
+
+// In auto and lock modes, the seam must not move from frame to frame (the
+// picture "jumps" when it moves), even if the pictures are noisy
+static void test_seam_stability(void) {
+    struct sc_quest q;
+    bool ok = sc_quest_init(&q, &default_params, 0, false);
+    assert(ok);
+    (void) ok;
+    assert(q.params.seam == SC_QUEST_SEAM_AUTO);
+
+    AVFrame *in = create_pano_frame(322);
+    const AVFrame *out = sc_quest_process(&q, in);
+    assert(out && out != in);
+
+    int *reference = malloc(sizeof(int) * SRC_H);
+    assert(reference);
+    memcpy(reference, q.seam, sizeof(int) * SRC_H);
+
+    uint32_t state = 1;
+    for (int frame = 0; frame < 40; ++frame) {
+        // add some noise everywhere
+        for (int i = 0; i < 200000; ++i) {
+            int x = next_random(&state) % SRC_W;
+            int y = next_random(&state) % SRC_H;
+            in->data[0][(size_t) y * in->linesize[0] + x] ^=
+                next_random(&state) & 0x1f;
+        }
+        sc_quest_process(&q, in);
+        assert(!memcmp(reference, q.seam, sizeof(int) * SRC_H));
+    }
+
+    sc_quest_handle_key(&q, SDL_SCANCODE_6, false);
+    assert(q.params.seam == SC_QUEST_SEAM_LOCK);
+    sc_quest_process(&q, in);
+    // auto -> lock freezes the current seam
+    assert(!memcmp(reference, q.seam, sizeof(int) * SRC_H));
+    // recompute explicitly
+    sc_quest_handle_key(&q, SDL_SCANCODE_7, false);
+    sc_quest_process(&q, in);
+    assert(q.seam_valid && !q.seam_relock);
+
+    free(reference);
+    av_frame_free(&in);
+    sc_quest_destroy(&q);
+}
+
+static void test_config(void) {
+    const char *path = "test_quest.conf";
+    struct sc_quest_params params = {
+        .angle = 21.3f,
+        .k1 = -0.31f,
+        .k2 = 0.02f,
+        .ovfrac = 0.852f,
+        .preset = SC_QUEST_PRESET_C,
+        .eye = SC_QUEST_EYE_RIGHT,
+        .seam = SC_QUEST_SEAM_FIXED,
+        .seam_x = -0.042f,
+    };
+    bool ok = sc_quest_config_save(path, &params);
+    assert(ok);
+
+    struct sc_quest_params loaded = default_params;
+    ok = sc_quest_config_load(path, &loaded);
+    assert(ok);
+    (void) ok;
+    assert(loaded.angle > 21.29f && loaded.angle < 21.31f);
+    assert(loaded.k1 > -0.311f && loaded.k1 < -0.309f);
+    assert(loaded.k2 > 0.019f && loaded.k2 < 0.021f);
+    assert(loaded.ovfrac > 0.8519f && loaded.ovfrac < 0.8521f);
+    assert(loaded.preset == SC_QUEST_PRESET_C);
+    assert(loaded.eye == SC_QUEST_EYE_RIGHT);
+    assert(loaded.seam == SC_QUEST_SEAM_FIXED);
+    assert(loaded.seam_x > -0.0421f && loaded.seam_x < -0.0419f);
+
+    char cli[256];
+    sc_quest_format_cli(&loaded, cli, sizeof(cli));
+    printf("%s\n", cli);
+    assert(!strcmp(cli, "--quest --quest-angle=21.3 --quest-k1=-0.31 "
+                        "--quest-k2=0.02 --quest-ovfrac=0.852 "
+                        "--quest-preset=C --quest-eye=right "
+                        "--quest-seam=fixed --quest-seam-x=-0.042"));
+
+    remove(path);
+    assert(!sc_quest_config_load(path, &loaded));
+}
+
 // Not a test: measure the processing duration (QUEST_BENCH=1), and optionally
 // dump the result of each preset as PPM (QUEST_DUMP=<prefix>)
 static void bench(void) {
     const char *dump = getenv("QUEST_DUMP");
 
     struct sc_quest q;
-    bool ok = sc_quest_init(&q, &default_params);
+    bool ok = sc_quest_init(&q, &default_params, 0, false);
     assert(ok);
     (void) ok;
 
@@ -316,6 +484,8 @@ int main(int argc, char *argv[]) {
 
     test_identity_merge();
     test_presets_and_keys();
+    test_seam_stability();
+    test_config();
 
     if (getenv("QUEST_BENCH")) {
         bench();

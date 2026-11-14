@@ -7,6 +7,10 @@
 #include <string.h>
 #include <libavutil/pixfmt.h>
 #include <SDL2/SDL_cpuinfo.h>
+#include <sys/stat.h>
+#ifdef _WIN32
+# include <direct.h>
+#endif
 
 #include "util/log.h"
 
@@ -17,9 +21,23 @@
 // The seam is computed on a picture downscaled by this factor
 #define SC_QUEST_SEAM_SCALE 4
 
-// A small cost is added to seam positions far from the seam of the previous
-// frame, to avoid flickering when several paths are almost equivalent
+// In dynamic mode, a small cost is added to seam positions far from the seam of
+// the previous frame, to limit flickering when several paths are almost
+// equivalent
 #define SC_QUEST_SEAM_STICKINESS_MAX 8
+
+// The seam costs are expressed in 1/16 of luma levels
+#define SC_QUEST_SEAM_COST_UNIT 16
+
+// In auto mode, the current seam is compared to the optimal one every
+// SC_QUEST_AUTO_PERIOD frames. It is replaced only if its average cost per
+// row was greater than twice the optimal cost + SC_QUEST_AUTO_MARGIN luma
+// levels for SC_QUEST_AUTO_BAD_COUNT consecutive evaluations, and if the
+// seam has not changed for SC_QUEST_AUTO_MIN_INTERVAL.
+#define SC_QUEST_AUTO_PERIOD 8
+#define SC_QUEST_AUTO_MARGIN 6
+#define SC_QUEST_AUTO_BAD_COUNT 4
+#define SC_QUEST_AUTO_MIN_INTERVAL SC_TICK_FROM_MS(2000)
 
 #define SC_QUEST_MAP_INVALID 0xFFFF
 // Coordinates are stored in 1/16 pixel units in 16 bits
@@ -29,6 +47,7 @@
 #define SC_QUEST_K_MAX 1.f
 #define SC_QUEST_OVFRAC_MIN 0.5f
 #define SC_QUEST_OVFRAC_MAX 0.98f
+#define SC_QUEST_SEAM_X_MAX 0.5f
 
 // View presets: crop of the merged picture, as fractions of its size
 struct sc_quest_crop {
@@ -43,6 +62,20 @@ static const struct sc_quest_crop presets[] = {
     {0.151f, 0.849f, 0.045f, 0.631f}, // B: (~1.13:1)
     {0.194f, 0.811f, 0.026f, 0.740f}, // C: tall (~0.82:1)
     {0.f, 1.f, 0.f, 1.f},             // D: full picture
+};
+
+// View presets for a single eye: centered crops of the eye picture, which fit
+// inside the rotated picture (no black corners with the default angle)
+static const struct sc_quest_crop eye_presets[] = {
+    {0.12f, 0.88f, 0.30f, 0.70f}, // A: wide (~1.78:1)
+    {0.12f, 0.88f, 0.18f, 0.82f}, // B: (~1.11:1)
+    {0.20f, 0.80f, 0.08f, 0.92f}, // C: tall (~0.67:1)
+    {0.f, 1.f, 0.f, 1.f},         // D: full picture
+};
+
+static const char *const eye_names[] = {"both", "left", "right"};
+static const char *const seam_names[] = {
+    "auto", "lock", "fixed", "dynamic",
 };
 
 /* Worker threads */
@@ -199,15 +232,226 @@ sc_quest_sanitize_params(struct sc_quest_params *params) {
             || params->preset > SC_QUEST_PRESET_D) {
         params->preset = SC_QUEST_PRESET_B;
     }
+    if (params->eye < SC_QUEST_EYE_BOTH || params->eye > SC_QUEST_EYE_RIGHT) {
+        params->eye = SC_QUEST_EYE_BOTH;
+    }
+    if (params->seam < SC_QUEST_SEAM_AUTO
+            || params->seam > SC_QUEST_SEAM_DYNAMIC) {
+        params->seam = SC_QUEST_SEAM_AUTO;
+    }
+    if (!(params->seam_x == params->seam_x)) {
+        params->seam_x = 0;
+    }
+    params->seam_x = clampf(params->seam_x, -SC_QUEST_SEAM_X_MAX,
+                            SC_QUEST_SEAM_X_MAX);
+}
+
+void
+sc_quest_format_cli(const struct sc_quest_params *params, char *buf,
+                    size_t size) {
+    snprintf(buf, size, "--quest --quest-angle=%.1f --quest-k1=%.2f "
+                        "--quest-k2=%.2f --quest-ovfrac=%.3f --quest-preset=%c "
+                        "--quest-eye=%s --quest-seam=%s --quest-seam-x=%.3f",
+             params->angle, params->k1, params->k2, params->ovfrac,
+             'A' + params->preset, eye_names[params->eye],
+             seam_names[params->seam], params->seam_x);
+}
+
+/* Config file */
+
+static char *
+sc_quest_config_get_path(void) {
+    const char *env = getenv("SCRCPY_QUEST_CONFIG");
+    if (env && *env) {
+        return strdup(env);
+    }
+
+    const char *home = getenv("HOME");
+#ifdef _WIN32
+    if (!home) {
+        home = getenv("USERPROFILE");
+    }
+#endif
+    if (!home || !*home) {
+        return NULL;
+    }
+
+    static const char dir[] = "/.config";
+    static const char name[] = "/scrcpy-quest.conf";
+    size_t len = strlen(home) + sizeof(dir) + sizeof(name);
+    char *path = malloc(len);
+    if (!path) {
+        LOG_OOM();
+        return NULL;
+    }
+
+    // Create ~/.config if necessary
+    snprintf(path, len, "%s%s", home, dir);
+#ifdef _WIN32
+    _mkdir(path);
+#else
+    mkdir(path, 0755);
+#endif
+
+    snprintf(path, len, "%s%s%s", home, dir, name);
+    return path;
+}
+
+static int
+find_name(const char *const *names, size_t count, const char *value) {
+    for (size_t i = 0; i < count; ++i) {
+        if (!strcmp(names[i], value)) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 bool
-sc_quest_init(struct sc_quest *q, const struct sc_quest_params *params) {
+sc_quest_config_load(const char *path, struct sc_quest_params *params) {
+    FILE *file = fopen(path, "r");
+    if (!file) {
+        return false;
+    }
+
+    char line[256];
+    while (fgets(line, sizeof(line), file)) {
+        char key[32];
+        char value[32];
+        if (line[0] == '#' || sscanf(line, " %31[a-z0-9] = %31s", key,
+                                     value) != 2) {
+            continue;
+        }
+
+        char *end;
+        float f = strtof(value, &end);
+        bool is_float = *end == '\0' && f == f;
+
+        if (!strcmp(key, "angle") && is_float) {
+            params->angle = f;
+        } else if (!strcmp(key, "k1") && is_float) {
+            params->k1 = f;
+        } else if (!strcmp(key, "k2") && is_float) {
+            params->k2 = f;
+        } else if (!strcmp(key, "ovfrac") && is_float) {
+            params->ovfrac = f;
+        } else if (!strcmp(key, "seamx") && is_float) {
+            params->seam_x = f;
+        } else if (!strcmp(key, "preset") && value[0] >= 'A'
+                && value[0] <= 'D' && !value[1]) {
+            params->preset = SC_QUEST_PRESET_A + (value[0] - 'A');
+        } else if (!strcmp(key, "eye")) {
+            int i = find_name(eye_names, ARRAY_LEN(eye_names), value);
+            if (i >= 0) {
+                params->eye = i;
+            }
+        } else if (!strcmp(key, "seam")) {
+            int i = find_name(seam_names, ARRAY_LEN(seam_names), value);
+            if (i >= 0) {
+                params->seam = i;
+            }
+        }
+    }
+
+    fclose(file);
+    sc_quest_sanitize_params(params);
+    return true;
+}
+
+bool
+sc_quest_config_save(const char *path, const struct sc_quest_params *params) {
+    FILE *file = fopen(path, "w");
+    if (!file) {
+        return false;
+    }
+
+    char cli[256];
+    sc_quest_format_cli(params, cli, sizeof(cli));
+
+    fprintf(file, "# scrcpy --quest: last values (saved automatically)\n"
+                  "# %s\n"
+                  "angle=%.1f\n"
+                  "k1=%.2f\n"
+                  "k2=%.2f\n"
+                  "ovfrac=%.3f\n"
+                  "preset=%c\n"
+                  "eye=%s\n"
+                  "seam=%s\n"
+                  "seamx=%.3f\n",
+            cli, params->angle, params->k1, params->k2, params->ovfrac,
+            'A' + params->preset, eye_names[params->eye],
+            seam_names[params->seam], params->seam_x);
+
+    return !fclose(file);
+}
+
+void
+sc_quest_save_config(struct sc_quest *q) {
+    if (!q->config_path) {
+        return;
+    }
+
+    if (!sc_quest_config_save(q->config_path, &q->params)) {
+        LOGW("Could not save quest parameters to %s", q->config_path);
+        // Do not retry (and do not report the error) on every change
+        free(q->config_path);
+        q->config_path = NULL;
+    }
+}
+
+// Print the current values as a ready-to-use command line
+static void
+sc_quest_print_cli(struct sc_quest *q) {
+    char cli[256];
+    sc_quest_format_cli(&q->params, cli, sizeof(cli));
+    printf("[quest] scrcpy %s\n", cli);
+    fflush(stdout);
+}
+
+bool
+sc_quest_init(struct sc_quest *q, const struct sc_quest_params *params,
+              uint8_t cli_set, bool use_config) {
     memset(q, 0, sizeof(*q));
 
     q->params = *params;
+
+    if (use_config) {
+        q->config_path = sc_quest_config_get_path();
+    }
+
+    if (q->config_path) {
+        struct sc_quest_params saved = *params;
+        if (sc_quest_config_load(q->config_path, &saved)) {
+            LOGI("Quest parameters loaded from %s", q->config_path);
+            // The values set on the command line take precedence
+            if (!(cli_set & SC_QUEST_SET_ANGLE)) {
+                q->params.angle = saved.angle;
+            }
+            if (!(cli_set & SC_QUEST_SET_K1)) {
+                q->params.k1 = saved.k1;
+            }
+            if (!(cli_set & SC_QUEST_SET_K2)) {
+                q->params.k2 = saved.k2;
+            }
+            if (!(cli_set & SC_QUEST_SET_OVFRAC)) {
+                q->params.ovfrac = saved.ovfrac;
+            }
+            if (!(cli_set & SC_QUEST_SET_PRESET)) {
+                q->params.preset = saved.preset;
+            }
+            if (!(cli_set & SC_QUEST_SET_EYE)) {
+                q->params.eye = saved.eye;
+            }
+            if (!(cli_set & SC_QUEST_SET_SEAM)) {
+                q->params.seam = saved.seam;
+            }
+            if (!(cli_set & SC_QUEST_SET_SEAM_X)) {
+                q->params.seam_x = saved.seam_x;
+            }
+        }
+    }
+
     sc_quest_sanitize_params(&q->params);
-    q->initial_params = q->params;
     q->processing = true;
     q->overlay = true;
     q->overlay_dirty = true;
@@ -215,17 +459,18 @@ sc_quest_init(struct sc_quest *q, const struct sc_quest_params *params) {
     q->out = av_frame_alloc();
     if (!q->out) {
         LOG_OOM();
+        free(q->config_path);
         return false;
     }
 
     if (!sc_quest_pool_init(&q->pool)) {
         av_frame_free(&q->out);
+        free(q->config_path);
         return false;
     }
 
-    LOGI("Quest mode enabled (angle=%.1f k1=%.3f k2=%.3f ovfrac=%.3f "
-         "preset=%c, %u threads)", q->params.angle, q->params.k1, q->params.k2,
-         q->params.ovfrac, 'A' + q->params.preset, q->pool.count + 1);
+    LOGI("Quest mode enabled (%u threads)", q->pool.count + 1);
+    sc_quest_print_cli(q);
 
     return true;
 }
@@ -242,6 +487,8 @@ sc_quest_destroy(struct sc_quest *q) {
     free(q->dp_cur);
     free(q->dp_back);
     free(q->seam_diff);
+    free(q->seam_candidate);
+    free(q->config_path);
 }
 
 /* Geometry */
@@ -281,6 +528,11 @@ sc_quest_compute_geometry(const struct sc_quest_params *params, int src_w,
     g->out_w = ew + g->off;
 
     const struct sc_quest_crop *preset = &presets[params->preset];
+    if (params->eye != SC_QUEST_EYE_BOTH) {
+        // A single eye, without merge
+        g->out_w = ew;
+        preset = &eye_presets[params->preset];
+    }
     // The crop rectangle must have even position and dimensions (YUV 4:2:0)
     int x0 = (int) lroundf(preset->x0 * g->out_w) & ~1;
     int y0 = (int) lroundf(preset->y0 * eh) & ~1;
@@ -402,6 +654,10 @@ sc_quest_configure(struct sc_quest *q, int src_w, int src_h) {
         return false;
     }
 
+    if (q->ov != g.ov) {
+        q->seam_valid = false;
+    }
+
     q->src_w = src_w;
     q->src_h = src_h;
     q->ew = g.ew;
@@ -448,7 +704,7 @@ sc_quest_configure(struct sc_quest *q, int src_w, int src_h) {
         q->map_angle = q->params.angle;
         q->map_k1 = q->params.k1;
         q->map_k2 = q->params.k2;
-        q->seam_low_valid = false;
+        q->seam_valid = false;
     }
 
     int low_w = g.ov / SC_QUEST_SEAM_SCALE;
@@ -456,7 +712,7 @@ sc_quest_configure(struct sc_quest *q, int src_w, int src_h) {
     if (low_w != q->low_w || low_h != q->low_h) {
         q->low_w = 0;
         q->low_h = 0;
-        q->seam_low_valid = false;
+        q->seam_valid = false;
 
         int *seam_low = realloc(q->seam_low, sizeof(int) * low_h);
         if (seam_low) {
@@ -478,7 +734,13 @@ sc_quest_configure(struct sc_quest *q, int src_w, int src_h) {
         if (seam_diff) {
             q->seam_diff = seam_diff;
         }
-        if (!seam_low || !dp_prev || !dp_cur || !dp_back || !seam_diff) {
+        int *seam_candidate =
+            realloc(q->seam_candidate, sizeof(int) * low_h);
+        if (seam_candidate) {
+            q->seam_candidate = seam_candidate;
+        }
+        if (!seam_low || !dp_prev || !dp_cur || !dp_back || !seam_diff
+                || !seam_candidate) {
             LOG_OOM();
             return false;
         }
@@ -499,7 +761,7 @@ sc_quest_configure(struct sc_quest *q, int src_w, int src_h) {
             out->height = 0;
             return false;
         }
-        LOGI("Quest output: %dx%d (merged %dx%d, eye %dx%d, overlap %d)",
+        LOGI("Quest output: %dx%d (uncropped %dx%d, eye %dx%d, overlap %d)",
              g.crop_w, g.crop_h, g.out_w, g.eh, g.ew, g.eh, g.ov);
     }
 
@@ -562,28 +824,32 @@ seam_diff_band(void *arg, unsigned band, unsigned nbands) {
     }
 }
 
+static inline int32_t
+seam_cost(const struct sc_quest *q, const uint8_t *diff, int lx) {
+    // A tiny cost (at most half a luma level) is added to positions far from
+    // the center of the overlap, so that the seam is centered where the two
+    // eyes are identical (for example on a black picture)
+    int center = q->low_w / 2;
+    return diff[lx] * SC_QUEST_SEAM_COST_UNIT
+         + abs(lx - center) * SC_QUEST_SEAM_COST_UNIT / q->low_w;
+}
+
 // Find the optimal seam in the overlap area by dynamic programming: the path
 // from top to bottom (moving by at most 1 horizontally per row) minimizing the
 // sum of absolute differences between the left and right eyes.
 //
-// For performance, it is computed at low resolution on the luma plane, then
-// interpolated.
-static void
-sc_quest_compute_seam(struct sc_quest *q, const AVFrame *frame) {
-    const int scale = SC_QUEST_SEAM_SCALE;
-    int eh = q->eh;
+// For performance, it is computed at low resolution on the luma plane.
+//
+// If sticky is set, positions close to the current seam are preferred.
+//
+// The resulting seam is written to seam_low. Return its cost.
+static int32_t
+sc_quest_find_seam(struct sc_quest *q, int *seam_low, bool sticky) {
     int low_w = q->low_w;
     int low_h = q->low_h;
 
-    struct sc_quest_seam_job job = {
-        .q = q,
-        .in = frame,
-    };
-    sc_quest_pool_run(&q->pool, seam_diff_band, &job);
-
     int32_t *prev = q->dp_prev;
     int32_t *cur = q->dp_cur;
-    bool sticky = q->seam_low_valid;
 
     for (int ly = 0; ly < low_h; ++ly) {
         const uint8_t *diff = q->seam_diff + (size_t) ly * low_w;
@@ -591,11 +857,13 @@ sc_quest_compute_seam(struct sc_quest *q, const AVFrame *frame) {
         int previous_seam = sticky ? q->seam_low[ly] : 0;
 
         for (int lx = 0; lx < low_w; ++lx) {
-            int32_t d = diff[lx];
+            int32_t d = seam_cost(q, diff, lx);
             if (sticky) {
                 int dist = abs(lx - previous_seam);
-                d += dist < SC_QUEST_SEAM_STICKINESS_MAX
-                   ? dist : SC_QUEST_SEAM_STICKINESS_MAX;
+                if (dist > SC_QUEST_SEAM_STICKINESS_MAX) {
+                    dist = SC_QUEST_SEAM_STICKINESS_MAX;
+                }
+                d += dist * SC_QUEST_SEAM_COST_UNIT;
             }
 
             if (ly == 0) {
@@ -622,15 +890,19 @@ sc_quest_compute_seam(struct sc_quest *q, const AVFrame *frame) {
         cur = tmp;
     }
 
-    // prev contains the last row
-    int sx = 0;
-    for (int lx = 1; lx < low_w; ++lx) {
-        if (prev[lx] < prev[sx]) {
+    // prev contains the last row. On equality, prefer the position closest
+    // to the center.
+    int center = low_w / 2;
+    int sx = center;
+    for (int lx = 0; lx < low_w; ++lx) {
+        if (prev[lx] < prev[sx]
+                || (prev[lx] == prev[sx]
+                    && abs(lx - center) < abs(sx - center))) {
             sx = lx;
         }
     }
+    int32_t cost = prev[sx];
 
-    int *seam_low = q->seam_low;
     seam_low[low_h - 1] = sx;
     for (int ly = low_h - 2; ly >= 0; --ly) {
         sx += q->dp_back[(size_t) (ly + 1) * low_w + sx];
@@ -641,9 +913,18 @@ sc_quest_compute_seam(struct sc_quest *q, const AVFrame *frame) {
         }
         seam_low[ly] = sx;
     }
-    q->seam_low_valid = true;
 
-    // Interpolate to full resolution
+    return cost;
+}
+
+// Interpolate the low resolution seam to full resolution
+static void
+sc_quest_apply_seam(struct sc_quest *q) {
+    const int scale = SC_QUEST_SEAM_SCALE;
+    int eh = q->eh;
+    int low_h = q->low_h;
+    const int *seam_low = q->seam_low;
+
     int *seam = q->seam;
     int max = q->ov - 1;
     for (int y = 0; y < eh; ++y) {
@@ -663,6 +944,103 @@ sc_quest_compute_seam(struct sc_quest *q, const AVFrame *frame) {
               + scale / 2;
         seam[y] = s > max ? max : s;
     }
+
+    q->seam_valid = true;
+    q->seam_relock = false;
+    q->seam_counter = 0;
+    q->seam_bad = 0;
+    q->seam_date = sc_tick_now();
+}
+
+// Update the seam (if necessary) according to the seam mode.
+//
+// The picture visibly "jumps" whenever the seam moves (close objects are not
+// at the same position in the two eyes), so the seam must be as stable as
+// possible.
+static void
+sc_quest_update_seam(struct sc_quest *q, const AVFrame *frame) {
+    enum sc_quest_seam mode = q->params.seam;
+
+    if (mode == SC_QUEST_SEAM_FIXED) {
+        // Straight vertical cut, by default at the center of the overlap
+        int x = q->ov / 2 + (int) lroundf(q->params.seam_x * q->ew);
+        if (x < 0) {
+            x = 0;
+        } else if (x > q->ov - 1) {
+            x = q->ov - 1;
+        }
+        if (!q->seam_valid || q->seam[0] != x) {
+            for (int y = 0; y < q->eh; ++y) {
+                q->seam[y] = x;
+            }
+            // seam_low is not used in this mode
+            q->seam_valid = true;
+            q->seam_relock = false;
+        }
+        return;
+    }
+
+    bool compute = !q->seam_valid || q->seam_relock;
+
+    if (!compute) {
+        if (mode == SC_QUEST_SEAM_LOCK) {
+            // Keep the seam until explicitly requested
+            return;
+        }
+
+        if (mode == SC_QUEST_SEAM_AUTO
+                && ++q->seam_counter < SC_QUEST_AUTO_PERIOD) {
+            return;
+        }
+    }
+
+    struct sc_quest_seam_job job = {
+        .q = q,
+        .in = frame,
+    };
+    sc_quest_pool_run(&q->pool, seam_diff_band, &job);
+
+    if (compute || mode == SC_QUEST_SEAM_DYNAMIC) {
+        // seam_low is not valid after the fixed mode
+        bool sticky = !compute;
+        sc_quest_find_seam(q, q->seam_low, sticky);
+        sc_quest_apply_seam(q);
+        return;
+    }
+
+    assert(mode == SC_QUEST_SEAM_AUTO);
+    q->seam_counter = 0;
+
+    // Compare the current seam with the optimal one for this frame
+    int low_w = q->low_w;
+    int low_h = q->low_h;
+    int64_t current_cost = 0;
+    for (int ly = 0; ly < low_h; ++ly) {
+        const uint8_t *diff = q->seam_diff + (size_t) ly * low_w;
+        current_cost += seam_cost(q, diff, q->seam_low[ly]);
+    }
+    int64_t optimal_cost = sc_quest_find_seam(q, q->seam_candidate, false);
+
+    int64_t margin = (int64_t) SC_QUEST_AUTO_MARGIN * SC_QUEST_SEAM_COST_UNIT
+                   * low_h;
+    if (current_cost <= 2 * optimal_cost + margin) {
+        // The current seam is still good enough
+        q->seam_bad = 0;
+        return;
+    }
+
+    if (++q->seam_bad < SC_QUEST_AUTO_BAD_COUNT) {
+        // Maybe temporary
+        return;
+    }
+
+    if (sc_tick_now() - q->seam_date < SC_QUEST_AUTO_MIN_INTERVAL) {
+        // Do not change the seam too often
+        return;
+    }
+
+    memcpy(q->seam_low, q->seam_candidate, sizeof(int) * low_h);
+    sc_quest_apply_seam(q);
 }
 
 /* Remap */
@@ -736,7 +1114,9 @@ remap_band(void *arg, unsigned band, unsigned nbands) {
     AVFrame *out = q->out;
 
     int ew = q->ew;
-    int off = q->off;
+    enum sc_quest_eye eye = q->params.eye;
+    // Offset of the right eye in the output (before cropping)
+    int off = eye == SC_QUEST_EYE_BOTH ? q->off : 0;
     int crop_x = q->crop.x;
     int crop_y = q->crop.y;
     int w = q->crop.w;
@@ -755,7 +1135,8 @@ remap_band(void *arg, unsigned band, unsigned nbands) {
     for (int oy = cy_start * 2; oy < cy_end * 2; ++oy) {
         int y = crop_y + oy;
         // First column (in the merged picture) taken from the right eye
-        int cut = off + q->seam[y];
+        int cut = eye == SC_QUEST_EYE_BOTH ? off + q->seam[y]
+                : eye == SC_QUEST_EYE_LEFT ? crop_x + w : crop_x;
         int nl = cut - crop_x;
         if (nl < 0) {
             nl = 0;
@@ -782,7 +1163,8 @@ remap_band(void *arg, unsigned band, unsigned nbands) {
 
     for (int oc = cy_start; oc < cy_end; ++oc) {
         int y = crop_y + oc * 2;
-        int cut = off + q->seam[y];
+        int cut = eye == SC_QUEST_EYE_BOTH ? off + q->seam[y]
+                : eye == SC_QUEST_EYE_LEFT ? crop_x + w : crop_x;
         // number of chroma pixels taken from the left eye
         int nl = (cut - crop_x + 1) / 2;
         if (nl < 0) {
@@ -820,7 +1202,9 @@ sc_quest_process(struct sc_quest *q, const AVFrame *frame) {
         return frame;
     }
 
-    sc_quest_compute_seam(q, frame);
+    if (q->params.eye == SC_QUEST_EYE_BOTH) {
+        sc_quest_update_seam(q, frame);
+    }
 
     struct sc_quest_remap_job job = {
         .q = q,
@@ -854,6 +1238,11 @@ sc_quest_is_key(SDL_Scancode scancode) {
         case SDL_SCANCODE_2:
         case SDL_SCANCODE_3:
         case SDL_SCANCODE_4:
+        case SDL_SCANCODE_5:
+        case SDL_SCANCODE_6:
+        case SDL_SCANCODE_7:
+        case SDL_SCANCODE_8:
+        case SDL_SCANCODE_9:
         case SDL_SCANCODE_0:
         case SDL_SCANCODE_LEFTBRACKET:
         case SDL_SCANCODE_RIGHTBRACKET:
@@ -897,9 +1286,43 @@ sc_quest_handle_key(struct sc_quest *q, SDL_Scancode scancode, bool shift) {
         case SDL_SCANCODE_4:
             p->preset = SC_QUEST_PRESET_D;
             break;
-        case SDL_SCANCODE_0:
-            *p = q->initial_params;
+        case SDL_SCANCODE_5:
+            // both -> left -> right
+            p->eye = (p->eye + 1) % 3;
             break;
+        case SDL_SCANCODE_6:
+            // auto -> lock -> fixed -> dynamic
+            p->seam = (p->seam + 1) % 4;
+            if (p->seam != SC_QUEST_SEAM_LOCK) {
+                // (auto -> lock freezes the current seam)
+                q->seam_valid = false;
+            }
+            break;
+        case SDL_SCANCODE_8:
+        case SDL_SCANCODE_9: {
+            // Move the fixed seam to the left or to the right
+            float seam_step = shift ? .01f : .001f;
+            if (scancode == SDL_SCANCODE_8) {
+                seam_step = -seam_step;
+            }
+            p->seam_x = step(p->seam_x, seam_step, .001f);
+            if (p->seam != SC_QUEST_SEAM_FIXED) {
+                p->seam = SC_QUEST_SEAM_FIXED;
+                q->seam_valid = false;
+            }
+            break;
+        }
+        case SDL_SCANCODE_7:
+            // Recompute the seam on the next frame (useful in locked mode)
+            q->seam_relock = true;
+            break;
+        case SDL_SCANCODE_0: {
+            static const struct sc_quest_params defaults =
+                SC_QUEST_PARAMS_DEFAULT;
+            *p = defaults;
+            q->seam_valid = false;
+            break;
+        }
         case SDL_SCANCODE_LEFTBRACKET:
             p->angle = step(p->angle, -angle_step, .1f);
             break;
@@ -937,11 +1360,11 @@ sc_quest_handle_key(struct sc_quest *q, SDL_Scancode scancode, bool shift) {
     sc_quest_sanitize_params(p);
     q->overlay_dirty = true;
 
-    if (q->processing) {
-        LOGI("Quest: preset=%c angle=%.1f k1=%.3f k2=%.3f ovfrac=%.3f",
-             'A' + p->preset, p->angle, p->k1, p->k2, p->ovfrac);
-    } else {
+    if (!q->processing) {
         LOGI("Quest: processing disabled (raw buffer)");
+    } else if (scancode != SDL_SCANCODE_SLASH
+            && scancode != SDL_SCANCODE_7) {
+        sc_quest_print_cli(q);
     }
 
     return true;
@@ -1098,13 +1521,24 @@ sc_quest_render_overlay(struct sc_quest *q, int *w, int *h) {
     const struct sc_quest_params *p = &q->params;
     char text[512];
     if (q->processing) {
+        char mode[64];
+        if (p->eye == SC_QUEST_EYE_BOTH) {
+            // seam position in the merged picture, at mid-height
+            int x = q->seam && q->seam_valid
+                  ? q->off + q->seam[q->eh / 2] : 0;
+            snprintf(mode, sizeof(mode), "BOTH EYES  SEAM %s X %d",
+                     seam_names[p->seam], x);
+        } else {
+            snprintf(mode, sizeof(mode), "%s EYE ONLY", eye_names[p->eye]);
+        }
         snprintf(text, sizeof(text),
-                 "QUEST VIEW %c  ANGLE %.1f  K1 %.2f  K2 %.2f  OVERLAP %.3f"
-                 "  %dX%d  %.1f MS\n"
-                 "1-4 VIEW  [ ] ANGLE  - = K1  ; ' K2  , . OVERLAP"
-                 "  \\ RAW  0 RESET  / HIDE",
-                 'A' + p->preset, p->angle, p->k1, p->k2, p->ovfrac,
-                 q->crop.w, q->crop.h, q->avg_ms);
+                 "QUEST VIEW %c  %s  %dX%d  %.1f MS\n"
+                 "ANGLE %.1f  K1 %.2f  K2 %.2f  OVERLAP %.3f\n"
+                 "1-4 VIEW  5 EYE  6 SEAM MODE  7 NEW SEAM  8 9 MOVE SEAM\n"
+                 "[ ] ANGLE  - = K1  ; ' K2  , . OVERLAP  \\ RAW"
+                 "  0 DEFAULTS  / HIDE",
+                 'A' + p->preset, mode, q->crop.w, q->crop.h, q->avg_ms,
+                 p->angle, p->k1, p->k2, p->ovfrac);
     } else {
         snprintf(text, sizeof(text),
                  "QUEST RAW BUFFER (PROCESSING OFF)\n"
