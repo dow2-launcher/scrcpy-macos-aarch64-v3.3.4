@@ -36,6 +36,11 @@ struct sc_display {
     } pending;
 
     bool has_frame;
+
+    // Optional overlay rendered on top of the content (top-left corner)
+    SDL_Texture *overlay;
+    int overlay_width;
+    int overlay_height;
 };
 
 enum sc_display_result {
@@ -56,6 +61,11 @@ sc_display_set_texture_size(struct sc_display *display, struct sc_size size);
 
 enum sc_display_result
 sc_display_update_texture(struct sc_display *display, const AVFrame *frame);
+
+// Set (or remove if pixels is NULL) the overlay content (ARGB8888)
+bool
+sc_display_set_overlay(struct sc_display *display, const uint32_t *pixels,
+                       int width, int height);
 
 enum sc_display_result
 sc_display_render(struct sc_display *display, const SDL_Rect *geometry,

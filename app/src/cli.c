@@ -114,6 +114,12 @@ enum {
     OPT_NO_VD_SYSTEM_DECORATIONS,
     OPT_NO_VD_DESTROY_CONTENT,
     OPT_DISPLAY_IME_POLICY,
+    OPT_QUEST,
+    OPT_QUEST_ANGLE,
+    OPT_QUEST_K1,
+    OPT_QUEST_K2,
+    OPT_QUEST_OVFRAC,
+    OPT_QUEST_PRESET,
 };
 
 struct sc_option {
@@ -794,6 +800,62 @@ static const struct sc_option options[] = {
         .text = "Set the target directory for pushing files to the device by "
                 "drag & drop. It is passed as is to \"adb push\".\n"
                 "Default is \"/sdcard/Download/\".",
+    },
+    {
+        .longopt_id = OPT_QUEST,
+        .longopt = "quest",
+        .text = "Meta Quest viewing mode: turn the raw two-eyes display "
+                "buffer into a single flat picture (per-eye lens correction, "
+                "mirrored rotation, and merge of the two eyes along an optimal "
+                "seam).\n"
+                "The parameters can be adjusted live from the window: 1/2/3/4 "
+                "select the view preset (A/B/C/D), [ and ] change the angle, "
+                "- and = change k1, ; and ' change k2, , and . change the "
+                "overlap (hold Shift for bigger steps), \\ toggles the "
+                "processing (raw buffer), / toggles the text overlay, 0 "
+                "resets the initial values.\n"
+                "Mouse and touch events are not forwarded in this mode.",
+    },
+    {
+        .longopt_id = OPT_QUEST_ANGLE,
+        .longopt = "quest-angle",
+        .argdesc = "degrees",
+        .text = "Set the initial rotation angle of the eyes for --quest "
+                "(positive for the left eye, mirrored for the right eye).\n"
+                "Default is 20.9.",
+    },
+    {
+        .longopt_id = OPT_QUEST_K1,
+        .longopt = "quest-k1",
+        .argdesc = "value",
+        .text = "Set the initial quadratic lens correction coefficient for "
+                "--quest.\n"
+                "Default is -0.26.",
+    },
+    {
+        .longopt_id = OPT_QUEST_K2,
+        .longopt = "quest-k2",
+        .argdesc = "value",
+        .text = "Set the initial double quadratic lens correction coefficient "
+                "for --quest.\n"
+                "Default is -0.05.",
+    },
+    {
+        .longopt_id = OPT_QUEST_OVFRAC,
+        .longopt = "quest-ovfrac",
+        .argdesc = "value",
+        .text = "Set the initial overlap between the two eyes for --quest, as "
+                "a fraction of the eye width (between 0.5 and 0.98).\n"
+                "Default is 0.844.",
+    },
+    {
+        .longopt_id = OPT_QUEST_PRESET,
+        .longopt = "quest-preset",
+        .argdesc = "value",
+        .text = "Set the initial view preset for --quest.\n"
+                "Possible values are \"A\" (wide), \"B\", \"C\" (tall) and "
+                "\"D\" (full picture).\n"
+                "Default is B.",
     },
     {
         .shortopt = 'r',
@@ -1542,6 +1604,52 @@ scrcpy_print_usage(const char *arg0) {
     for (size_t i = 0; i < ARRAY_LEN(exit_statuses); ++i) {
         print_exit_status(&exit_statuses[i], cols);
     }
+}
+
+static bool
+parse_float_arg(const char *s, float *out, float min, float max,
+                const char *name) {
+    char *endptr;
+    if (*s == '\0') {
+        LOGE("Could not parse %s: %s", name, s);
+        return false;
+    }
+    float value = strtof(s, &endptr);
+    if (*endptr != '\0' || value != value) {
+        LOGE("Could not parse %s: %s", name, s);
+        return false;
+    }
+
+    if (value < min || value > max) {
+        LOGE("Could not parse %s: value (%s) out-of-range (%g; %g)", name, s,
+             min, max);
+        return false;
+    }
+
+    *out = value;
+    return true;
+}
+
+static bool
+parse_quest_preset(const char *s, enum sc_quest_preset *preset) {
+    if (s[0] && !s[1]) {
+        char c = s[0];
+        if (c >= 'a' && c <= 'd') {
+            *preset = SC_QUEST_PRESET_A + (c - 'a');
+            return true;
+        }
+        if (c >= 'A' && c <= 'D') {
+            *preset = SC_QUEST_PRESET_A + (c - 'A');
+            return true;
+        }
+        if (c >= '1' && c <= '4') {
+            *preset = SC_QUEST_PRESET_A + (c - '1');
+            return true;
+        }
+    }
+
+    LOGE("Unsupported quest preset: %s (expected A, B, C or D)", s);
+    return false;
 }
 
 static bool
@@ -2543,6 +2651,43 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
             case OPT_PUSH_TARGET:
                 opts->push_target = optarg;
                 break;
+            case OPT_QUEST:
+                opts->quest = true;
+                break;
+            case OPT_QUEST_ANGLE:
+                if (!parse_float_arg(optarg, &opts->quest_params.angle, -45,
+                                     45, "quest angle")) {
+                    return false;
+                }
+                opts->quest = true;
+                break;
+            case OPT_QUEST_K1:
+                if (!parse_float_arg(optarg, &opts->quest_params.k1, -1, 1,
+                                     "quest k1")) {
+                    return false;
+                }
+                opts->quest = true;
+                break;
+            case OPT_QUEST_K2:
+                if (!parse_float_arg(optarg, &opts->quest_params.k2, -1, 1,
+                                     "quest k2")) {
+                    return false;
+                }
+                opts->quest = true;
+                break;
+            case OPT_QUEST_OVFRAC:
+                if (!parse_float_arg(optarg, &opts->quest_params.ovfrac, 0.5f,
+                                     0.98f, "quest ovfrac")) {
+                    return false;
+                }
+                opts->quest = true;
+                break;
+            case OPT_QUEST_PRESET:
+                if (!parse_quest_preset(optarg, &opts->quest_params.preset)) {
+                    return false;
+                }
+                opts->quest = true;
+                break;
             case OPT_PREFER_TEXT:
                 if (opts->key_inject_mode != SC_KEY_INJECT_MODE_MIXED) {
                     LOGE("--prefer-text is incompatible with --raw-key-events");
@@ -3278,6 +3423,11 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
         return false;
     }
 # endif
+
+    if (opts->quest && !opts->video_playback) {
+        LOGW("--quest has no effect without video playback");
+        opts->quest = false;
+    }
 
     if (opts->start_fps_counter && !opts->video_playback) {
         LOGW("--print-fps has no effect without video playback");

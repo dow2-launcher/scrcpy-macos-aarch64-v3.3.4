@@ -824,6 +824,8 @@ aoa_complete:
             .mipmaps = options->mipmaps,
             .fullscreen = options->fullscreen,
             .start_fps_counter = options->start_fps_counter,
+            .quest = options->quest,
+            .quest_params = options->quest_params,
         };
 
         if (!sc_screen_init(&s->screen, &screen_params)) {

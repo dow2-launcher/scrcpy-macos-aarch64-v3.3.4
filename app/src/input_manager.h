@@ -44,6 +44,11 @@ struct sc_input_manager {
     uint16_t last_mod;
 
     uint64_t next_sequence; // used for request acknowledgements
+
+    // Meta Quest viewing mode: some keys are handled locally, and positional
+    // events (mouse and touch) are not forwarded
+    bool quest;
+    bool quest_swallow_text;
 };
 
 struct sc_input_manager_params {
@@ -58,6 +63,7 @@ struct sc_input_manager_params {
     bool legacy_paste;
     bool clipboard_autosync;
     uint8_t shortcut_mods; // OR of enum sc_shortcut_mod values
+    bool quest;
 };
 
 void

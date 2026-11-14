@@ -71,6 +71,12 @@ _scrcpy() {
         --prefer-text
         --print-fps
         --push-target=
+        --quest
+        --quest-angle=
+        --quest-k1=
+        --quest-k2=
+        --quest-ovfrac=
+        --quest-preset=
         -r --record=
         --raw-key-events
         --record-format=
@@ -204,6 +210,10 @@ _scrcpy() {
         |--new-display \
         |-p|--port \
         |--push-target \
+        |--quest-angle \
+        |--quest-k1 \
+        |--quest-k2 \
+        |--quest-ovfrac \
         |--rotation \
         |--screen-off-timeout \
         |--tunnel-host \

@@ -95,6 +95,9 @@ sc_display_init(struct sc_display *display, SDL_Window *window,
     display->pending.flags = 0;
     display->pending.frame = NULL;
     display->has_frame = false;
+    display->overlay = NULL;
+    display->overlay_width = 0;
+    display->overlay_height = 0;
 
     if (icon_novideo) {
         // Without video, set a static scrcpy icon as window content
@@ -122,7 +125,78 @@ sc_display_destroy(struct sc_display *display) {
     if (display->texture) {
         SDL_DestroyTexture(display->texture);
     }
+    if (display->overlay) {
+        SDL_DestroyTexture(display->overlay);
+    }
     SDL_DestroyRenderer(display->renderer);
+}
+
+bool
+sc_display_set_overlay(struct sc_display *display, const uint32_t *pixels,
+                       int width, int height) {
+    if (display->overlay && (!pixels || display->overlay_width != width
+                                     || display->overlay_height != height)) {
+        SDL_DestroyTexture(display->overlay);
+        display->overlay = NULL;
+    }
+
+    if (!pixels) {
+        return true;
+    }
+
+    if (!display->overlay) {
+        display->overlay = SDL_CreateTexture(display->renderer,
+                                             SDL_PIXELFORMAT_ARGB8888,
+                                             SDL_TEXTUREACCESS_STREAMING,
+                                             width, height);
+        if (!display->overlay) {
+            LOGD("Could not create overlay texture: %s", SDL_GetError());
+            return false;
+        }
+        SDL_SetTextureBlendMode(display->overlay, SDL_BLENDMODE_BLEND);
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+        SDL_SetTextureScaleMode(display->overlay, SDL_ScaleModeNearest);
+#endif
+        display->overlay_width = width;
+        display->overlay_height = height;
+    }
+
+    int ret = SDL_UpdateTexture(display->overlay, NULL, pixels,
+                                width * sizeof(uint32_t));
+    if (ret) {
+        LOGD("Could not update overlay texture: %s", SDL_GetError());
+        return false;
+    }
+
+    return true;
+}
+
+static void
+sc_display_render_overlay(struct sc_display *display,
+                          const SDL_Rect *geometry) {
+    assert(display->overlay);
+
+    int ow;
+    int oh;
+    if (SDL_GetRendererOutputSize(display->renderer, &ow, &oh)) {
+        return;
+    }
+
+    // Integer scale so that the overlay takes at most ~60% of the width
+    int scale = ow * 3 / (display->overlay_width * 5);
+    if (scale < 1) {
+        scale = 1;
+    } else if (scale > 4) {
+        scale = 4;
+    }
+
+    SDL_Rect rect = {
+        .x = (geometry ? geometry->x : 0) + 4 * scale,
+        .y = (geometry ? geometry->y : 0) + 4 * scale,
+        .w = display->overlay_width * scale,
+        .h = display->overlay_height * scale,
+    };
+    SDL_RenderCopy(display->renderer, display->overlay, NULL, &rect);
 }
 
 static SDL_Texture *
@@ -344,6 +418,10 @@ sc_display_render(struct sc_display *display, const SDL_Rect *geometry,
             LOGE("Could not render texture: %s", SDL_GetError());
             return SC_DISPLAY_RESULT_ERROR;
         }
+    }
+
+    if (display->overlay) {
+        sc_display_render_overlay(display, geometry);
     }
 
     SDL_RenderPresent(display->renderer);

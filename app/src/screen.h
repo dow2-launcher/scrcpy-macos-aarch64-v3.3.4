@@ -18,6 +18,7 @@
 #include "input_manager.h"
 #include "mouse_capture.h"
 #include "options.h"
+#include "quest.h"
 #include "trait/key_processor.h"
 #include "trait/frame_sink.h"
 #include "trait/mouse_processor.h"
@@ -69,6 +70,11 @@ struct sc_screen {
 
     bool paused;
     AVFrame *resume_frame;
+
+    // Meta Quest viewing mode
+    bool quest_enabled;
+    bool quest_refresh_pending;
+    struct sc_quest quest;
 };
 
 struct sc_screen_params {
@@ -100,6 +106,9 @@ struct sc_screen_params {
 
     bool fullscreen;
     bool start_fps_counter;
+
+    bool quest;
+    struct sc_quest_params quest_params;
 };
 
 // initialize screen, create window, renderer and texture (window is hidden)
@@ -146,6 +155,11 @@ sc_screen_set_orientation(struct sc_screen *screen,
 // set the display pause state
 void
 sc_screen_set_paused(struct sc_screen *screen, bool paused);
+
+// handle a key of the Meta Quest viewing mode (only if enabled)
+void
+sc_screen_quest_handle_key(struct sc_screen *screen, SDL_Scancode scancode,
+                           bool shift);
 
 // react to SDL events
 // If this function returns false, scrcpy must exit with an error.

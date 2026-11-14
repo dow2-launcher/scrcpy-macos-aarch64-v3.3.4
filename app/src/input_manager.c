@@ -45,6 +45,9 @@ sc_input_manager_init(struct sc_input_manager *im,
     im->last_mod = 0;
     im->key_repeat = 0;
 
+    im->quest = params->quest;
+    im->quest_swallow_text = false;
+
     im->next_sequence = 1; // 0 is reserved for SC_SEQUENCE_INVALID
 }
 
@@ -388,6 +391,25 @@ sc_input_manager_process_key(struct sc_input_manager *im,
     uint16_t mods = im->sdl_shortcut_mods;
     bool is_shortcut = sc_shortcut_mods_is_shortcut_mod(mods, mod)
                     || sc_shortcut_mods_is_shortcut_key(mods, sdl_keycode);
+
+    if (im->quest) {
+        // In Meta Quest viewing mode, some keys (without shortcut modifier)
+        // are used to adjust the processing parameters live. They are
+        // identified by scancode (physical key) to work with any layout, and
+        // are never forwarded to the device.
+        bool other_mods = mod & (KMOD_CTRL | KMOD_ALT | KMOD_GUI);
+        im->quest_swallow_text = false;
+        if (!is_shortcut && !other_mods
+                && sc_quest_is_key(event->keysym.scancode)) {
+            if (down) {
+                // The associated text input event must be ignored too
+                im->quest_swallow_text = true;
+                sc_screen_quest_handle_key(im->screen, event->keysym.scancode,
+                                           shift);
+            }
+            return;
+        }
+    }
 
     if (down && !repeat) {
         if (sdl_keycode == im->last_keycode && mod == im->last_mod) {
@@ -1019,6 +1041,10 @@ sc_input_manager_handle_event(struct sc_input_manager *im,
     bool paused = im->screen->paused;
     switch (event->type) {
         case SDL_TEXTINPUT:
+            if (im->quest_swallow_text) {
+                // Text produced by a key handled locally
+                break;
+            }
             if (!im->kp || paused) {
                 break;
             }
@@ -1031,13 +1057,13 @@ sc_input_manager_handle_event(struct sc_input_manager *im,
             sc_input_manager_process_key(im, &event->key);
             break;
         case SDL_MOUSEMOTION:
-            if (!im->mp || paused) {
+            if (!im->mp || paused || im->quest) {
                 break;
             }
             sc_input_manager_process_mouse_motion(im, &event->motion);
             break;
         case SDL_MOUSEWHEEL:
-            if (!im->mp || paused) {
+            if (!im->mp || paused || im->quest) {
                 break;
             }
             sc_input_manager_process_mouse_wheel(im, &event->wheel);
@@ -1046,12 +1072,17 @@ sc_input_manager_handle_event(struct sc_input_manager *im,
         case SDL_MOUSEBUTTONUP:
             // some mouse events do not interact with the device, so process
             // the event even if control is disabled
+            if (im->quest) {
+                // The window content does not match the device screen, so
+                // positional events make no sense
+                break;
+            }
             sc_input_manager_process_mouse_button(im, &event->button);
             break;
         case SDL_FINGERMOTION:
         case SDL_FINGERDOWN:
         case SDL_FINGERUP:
-            if (!im->mp || paused) {
+            if (!im->mp || paused || im->quest) {
                 break;
             }
             sc_input_manager_process_touch(im, &event->tfinger);

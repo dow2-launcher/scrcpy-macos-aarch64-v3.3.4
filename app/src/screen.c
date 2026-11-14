@@ -1,6 +1,7 @@
 #include "screen.h"
 
 #include <assert.h>
+#include <stdlib.h>
 #include <string.h>
 #include <SDL2/SDL.h>
 
@@ -429,6 +430,16 @@ sc_screen_init(struct sc_screen *screen,
         goto error_destroy_display;
     }
 
+    screen->quest_enabled = false;
+    screen->quest_refresh_pending = false;
+    if (params->video && params->quest) {
+        if (!sc_quest_init(&screen->quest, &params->quest_params)) {
+            av_frame_free(&screen->frame);
+            goto error_destroy_display;
+        }
+        screen->quest_enabled = true;
+    }
+
     struct sc_input_manager_params im_params = {
         .controller = params->controller,
         .fp = params->fp,
@@ -440,6 +451,7 @@ sc_screen_init(struct sc_screen *screen,
         .legacy_paste = params->legacy_paste,
         .clipboard_autosync = params->clipboard_autosync,
         .shortcut_mods = params->shortcut_mods,
+        .quest = screen->quest_enabled,
     };
 
     sc_input_manager_init(&screen->im, &im_params);
@@ -532,6 +544,9 @@ sc_screen_destroy(struct sc_screen *screen) {
 #endif
     sc_display_destroy(&screen->display);
     av_frame_free(&screen->frame);
+    if (screen->quest_enabled) {
+        sc_quest_destroy(&screen->quest);
+    }
     SDL_DestroyWindow(screen->window);
     sc_fps_counter_destroy(&screen->fps_counter);
     sc_frame_buffer_destroy(&screen->fb);
@@ -610,6 +625,12 @@ sc_screen_init_size(struct sc_screen *screen) {
 
     // The requested size is passed via screen->frame_size
 
+    if (screen->quest_enabled) {
+        // The texture contains the processed frame
+        screen->frame_size = sc_quest_get_output_size(&screen->quest,
+                                                      screen->frame_size);
+    }
+
     struct sc_size content_size =
         get_oriented_size(screen->frame_size, screen->orientation);
     screen->content_size = content_size;
@@ -641,13 +662,40 @@ prepare_for_frame(struct sc_screen *screen, struct sc_size new_frame_size) {
     return sc_display_set_texture_size(&screen->display, screen->frame_size);
 }
 
+static void
+sc_screen_update_quest_overlay(struct sc_screen *screen) {
+    assert(screen->quest_enabled);
+
+    if (!sc_quest_consume_overlay_dirty(&screen->quest)) {
+        return;
+    }
+
+    int w = 0;
+    int h = 0;
+    uint32_t *pixels = sc_quest_render_overlay(&screen->quest, &w, &h);
+    // pixels may be NULL to remove the overlay
+    sc_display_set_overlay(&screen->display, pixels, w, h);
+    free(pixels);
+}
+
 static bool
-sc_screen_apply_frame(struct sc_screen *screen) {
+sc_screen_apply_frame(struct sc_screen *screen, bool new_frame) {
     assert(screen->video);
 
-    sc_fps_counter_add_rendered_frame(&screen->fps_counter);
+    if (new_frame) {
+        sc_fps_counter_add_rendered_frame(&screen->fps_counter);
+    }
 
-    AVFrame *frame = screen->frame;
+    const AVFrame *frame = screen->frame;
+    if (screen->quest_enabled) {
+        // Replace the decoded frame by the processed one
+        frame = sc_quest_process(&screen->quest, frame);
+        if (!frame) {
+            return false;
+        }
+        sc_screen_update_quest_overlay(screen);
+    }
+
     struct sc_size new_frame_size = {frame->width, frame->height};
     enum sc_display_result res = prepare_for_frame(screen, new_frame_size);
     if (res == SC_DISPLAY_RESULT_ERROR) {
@@ -702,7 +750,7 @@ sc_screen_update_frame(struct sc_screen *screen) {
 
     av_frame_unref(screen->frame);
     sc_frame_buffer_consume(&screen->fb, screen->frame);
-    return sc_screen_apply_frame(screen);
+    return sc_screen_apply_frame(screen, true);
 }
 
 void
@@ -720,7 +768,7 @@ sc_screen_set_paused(struct sc_screen *screen, bool paused) {
         av_frame_free(&screen->frame);
         screen->frame = screen->resume_frame;
         screen->resume_frame = NULL;
-        sc_screen_apply_frame(screen);
+        sc_screen_apply_frame(screen, true);
     }
 
     if (!paused) {
@@ -798,9 +846,41 @@ sc_screen_resize_to_pixel_perfect(struct sc_screen *screen) {
                                             content_size.height);
 }
 
+void
+sc_screen_quest_handle_key(struct sc_screen *screen, SDL_Scancode scancode,
+                           bool shift) {
+    if (!screen->quest_enabled) {
+        return;
+    }
+
+    bool changed = sc_quest_handle_key(&screen->quest, scancode, shift);
+    if (!changed || screen->quest_refresh_pending) {
+        return;
+    }
+
+    // Do not reprocess the frame immediately: if several key events are
+    // queued (key repeat), they are all applied before the single refresh
+    bool ok = sc_push_event(SC_EVENT_QUEST_REFRESH);
+    if (ok) {
+        screen->quest_refresh_pending = true;
+    }
+}
+
 bool
 sc_screen_handle_event(struct sc_screen *screen, const SDL_Event *event) {
     switch (event->type) {
+        case SC_EVENT_QUEST_REFRESH: {
+            screen->quest_refresh_pending = false;
+            if (screen->quest_enabled && screen->has_frame) {
+                // Reprocess the current frame with the new parameters
+                bool ok = sc_screen_apply_frame(screen, false);
+                if (!ok) {
+                    LOGE("Frame update failed\n");
+                    return false;
+                }
+            }
+            return true;
+        }
         case SC_EVENT_SCREEN_INIT_SIZE: {
             // The initial size is passed via screen->frame_size
             bool ok = sc_screen_init_size(screen);
