@@ -16,6 +16,9 @@ struct sc_decoder {
 
     AVCodecContext *ctx;
     AVFrame *frame;
+    // Only used for hardware decoding
+    AVFrame *sw_frame;
+    AVFrame *hw_tmp_frame;
 };
 
 // The name must be statically allocated (e.g. a string literal)

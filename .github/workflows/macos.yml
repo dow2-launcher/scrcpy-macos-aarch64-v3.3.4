@@ -123,6 +123,31 @@ jobs:
             sysctl -n machdep.cpu.brand_string hw.ncpu
             QUEST_BENCH=1 "$build/test_quest" | grep -E '^(preset|bench)'
 
+      # Informative only: run the packaged client without device (a fake adb
+      # sends a recorded stream), to check the decoding paths of the Quest mode
+      - name: Smoke test (fake device)
+        continue-on-error: true
+        run: |
+            set -x
+            bin="$PWD/release/output/${{ steps.package.outputs.name }}/scrcpy"
+            export ADB="$PWD/release/quest/e2e/fake_adb.py"
+            export SCRCPY_SERVER_PATH="$PWD/release/quest/README.txt"
+            run() {
+                echo "=== $*"
+                "$bin" --quest --quest-no-config --no-audio --no-control \
+                    --quest-perf --time-limit=6 "$@" > smoke.log 2>&1 &
+                pid=$!
+                ( sleep 40; kill $pid 2>/dev/null ) &
+                wait $pid
+                echo "exit code: $?"
+                grep -E 'PERF|Quest|Renderer|ERROR|WARN' smoke.log | tail -12
+            }
+            run
+            run --quest-decode-threads=3
+            run --quest-hwdec=on
+            run --quest-hwdec=on --video-codec=h265
+            run --video-codec=h265
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -155,7 +180,7 @@ jobs:
             shasum -a 256 *.zip > SHA256SUMS.txt
             cat SHA256SUMS.txt
             cat > notes.md <<NOTES
-            scrcpy v3.3.4 with the Meta Quest 3 viewing mode (\`--quest\`).
+            scrcpy v3.3.4 with the Meta Quest 3 viewing mode (\`--quest\`), версия ${GITHUB_REF_NAME##*quest}.
 
             Unzip, then (the binaries are not notarized by Apple):
 
@@ -167,6 +192,6 @@ jobs:
             NOTES
             gh release create "$GITHUB_REF_NAME" \
                 --repo "$GITHUB_REPOSITORY" \
-                --title "scrcpy-quest $GITHUB_REF_NAME" \
+                --title "scrcpy-quest $GITHUB_REF_NAME (версия ${GITHUB_REF_NAME##*quest})" \
                 --notes-file notes.md \
                 *.zip SHA256SUMS.txt

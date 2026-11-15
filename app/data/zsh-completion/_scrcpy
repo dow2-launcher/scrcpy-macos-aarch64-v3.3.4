@@ -82,6 +82,8 @@ arguments=(
     '--quest-no-config[Do not load or save the --quest parameters from/to the config file]'
     '--quest-seam=[Set the seam mode for --quest]:mode:(auto lock fixed dynamic)'
     '--quest-seam-x=[Set the position of the straight vertical seam for --quest]'
+    '--quest-decode-threads=[Set the number of video decoding threads for --quest]'
+    '--quest-hwdec=[Enable or disable hardware video decoding for --quest]:value:(on off)'
     '--quest-perf[Show the performance line in the --quest overlay]'
     '--quest-k1=[Set the initial quadratic lens correction coefficient for --quest]'
     '--quest-k2=[Set the initial double quadratic lens correction coefficient for --quest]'

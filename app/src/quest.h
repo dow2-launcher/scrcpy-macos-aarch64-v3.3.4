@@ -7,6 +7,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <libavcodec/avcodec.h>
 #include <libavutil/frame.h>
 #include <SDL2/SDL_scancode.h>
 
@@ -57,6 +58,27 @@ struct sc_quest_stats {
 };
 
 extern struct sc_quest_stats sc_quest_stats;
+
+// Video decoder configuration (set by sc_quest_resolve_options())
+struct sc_quest_decode {
+    unsigned threads; // 0 or 1: default (single thread)
+    bool hwdec;
+    atomic_bool hwdec_active; // a hardware frame has been decoded
+};
+
+extern struct sc_quest_decode sc_quest_decode;
+
+// To be called by the demuxer before opening the video codec
+void
+sc_quest_configure_decoder(AVCodecContext *ctx);
+
+// Download a hardware frame to a YUV420P frame (tmp is a temporary frame)
+bool
+sc_quest_download_frame(const AVFrame *hw_frame, AVFrame *tmp, AVFrame *out);
+
+// Number of decoding threads to use for a bit rate in automatic mode
+unsigned
+sc_quest_get_auto_decode_threads(uint32_t bit_rate);
 
 // To be called by the video decoder for every decoded frame
 void
@@ -130,8 +152,7 @@ struct sc_quest {
 
     // Video quality to apply by restarting (if restart_pending)
     bool restart_pending;
-    uint32_t restart_bit_rate;
-    enum sc_codec restart_codec;
+    struct sc_quest_params restart; // (only the stream parameters are used)
     sc_tick restart_date; // date of the last quality key press
     bool restarting;
 
@@ -154,6 +175,7 @@ struct sc_quest {
     uint64_t draw_us;
     uint64_t process_us;
     float rate_mbps; // actual video bit rate
+    bool decoder_too_slow;
     char perf_text[160];
 
     // stats

@@ -199,6 +199,10 @@ run_demuxer(void *data) {
         codec_ctx->width = width;
         codec_ctx->height = height;
         codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+
+        // Meta Quest viewing mode: the pictures are big, a single decoding
+        // thread may be too slow at high bit rates
+        sc_quest_configure_decoder(codec_ctx);
     } else {
         // Hardcoded audio properties
 #ifdef SCRCPY_LAVU_HAS_CHLAYOUT

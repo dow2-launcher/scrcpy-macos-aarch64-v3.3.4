@@ -55,8 +55,10 @@ bigger steps.
 | <kbd>-</kbd> <kbd>=</kbd>    | Lens correction `k1` ∓0.01 (curved straight lines)      |
 | <kbd>;</kbd> <kbd>'</kbd>    | Lens correction `k2` ∓0.01                              |
 | <kbd>,</kbd> <kbd>.</kbd>    | Eyes overlap `ovfrac` ∓0.002 (doubled or torn seam)     |
-| <kbd>Q</kbd> / <kbd>Shift</kbd>+<kbd>Q</kbd> | Video quality: next / previous bit rate (16, 40, 80, 120, 200 Mbps) |
+| <kbd>Q</kbd> / <kbd>Shift</kbd>+<kbd>Q</kbd> | Video quality: next / previous bit rate (16, 30, 50, 80, 120, 200 Mbps) |
 | <kbd>H</kbd>                 | Video codec: H.264 ↔ H.265 (H.265 is decoded in software: slower, adds latency) |
+| <kbd>T</kbd>                 | Decoding threads: auto → 1 → 2 → 3 → 4 → 6             |
+| <kbd>V</kbd>                 | Hardware decoding (VideoToolbox, experimental) on / off |
 | <kbd>F</kbd>                 | Toggle fullscreen                                       |
 | <kbd>M</kbd>                 | Resize the window to fill the screen                    |
 | <kbd>P</kbd>                 | Toggle the performance line (also printed to the terminal every second) |
@@ -81,28 +83,51 @@ pixels of the merged picture).
 
 **Video quality.** Blocky artifacts come from the encoder bit rate: the scrcpy
 default (8 Mbps) is far too low for the Quest display size, so in `--quest`
-mode the default is **80 Mbps** (unless `-b`/`--video-bit-rate` is given). The
-encoder parameters cannot be changed on a running stream, so
-<kbd>Q</kbd>/<kbd>H</kbd> restart the mirroring with the new values about one
+mode the default is **30 Mbps** (unless `-b`/`--video-bit-rate` is given). The
+encoder and decoder parameters cannot be changed on a running stream, so
+<kbd>Q</kbd>/<kbd>H</kbd>/<kbd>T</kbd>/<kbd>V</kbd> restart the mirroring with the new values about one
 second after the last key press: the window closes and reopens at the same
 place within a couple of seconds, and all the other settings are kept. The
 overlay shows the requested bit rate, the codec and the bit rate actually
 received (`ACTUAL`; the encoder produces less on static pictures). The new
 quality is remembered only once a picture has been received with it: if the
-headset encoder rejects a setting (for example H.265), scrcpy exits and the
-next run uses the previous working values.
+headset encoder rejects a setting, scrcpy exits and the next run uses the
+previous working values. The codec is never remembered (H.264 unless
+`--video-codec` is given). The effective values are printed on start
+(`Quest stream: …`).
 
-**Latency.** Keep **H.264** (the default): on a Mac, H.265 is decoded in
-software (the static build has no hardware decoding), which is too slow for
-this picture size and adds a clearly visible delay; the overlay marks it
-`(SLOWER)`. Moreover, the Quest H.265 encoder rejects the full 4128-pixel
+**Latency.** The pictures are big (4128×2208 at up to 90 fps), and the higher
+the bit rate, the longer each picture takes to decode. When the decoder is
+slower than the stream, the pictures queue up before it and the delay grows
+to hundreds of milliseconds: measured on an Apple Silicon Mac, one thread
+keeps up with H.264 at 30 Mbps, but not at 40 Mbps (~13 ms per picture). So:
+
+ - up to 32 Mbps, a single decoding thread is used (lowest latency);
+ - above, several threads are used automatically (2 up to 56 Mbps, 3 up to
+   90, 4 up to 130, then 6): with N threads the decoder is up to N times
+   faster, but its output is delayed by N−1 pictures (~13 ms each at 78 fps).
+   <kbd>T</kbd> or `--quest-decode-threads=N` forces a value;
+ - <kbd>V</kbd> or `--quest-hwdec=on` enables hardware decoding by
+   VideoToolbox (macOS only, **experimental**: not tested on a real Mac with
+   the headset). If it works, it is the fastest option at any bit rate; the
+   performance line then shows `(HW)`;
+ - if the performance line shows `LOAD` close to 100 % `(TOO SLOW)`, or a
+   growing `DELAY`, the decoder does not keep up: add threads
+   (<kbd>T</kbd>), lower the quality (<kbd>Shift</kbd>+<kbd>Q</kbd>) or limit
+   the frame rate (`--max-fps=60`).
+
+Keep **H.264** (the default): on a Mac, H.265 is decoded in software unless
+hardware decoding is enabled, which is too slow for this picture size and
+adds a clearly visible delay; the overlay marks it `(SLOWER)`. Moreover, the Quest H.265 encoder rejects the full 4128-pixel
 width, so with H.265 the size is limited to 4096 (`--max-size` to change);
 when an encoder fails, the headset silently retries with a much smaller
 picture: the actual size is logged (`Quest input: WxH`) and shown in the
 performance line.
 
 **Performance line** (<kbd>P</kbd> or `--quest-perf`):
-`DECODE` (ms per frame in the video decoder), `QUEST` (processing), `DRAW`
+`DECODE` (ms per frame in the video decoder, with the number of threads or
+`HW`, and `LOAD`: the share of time its thread spends decoding), `QUEST`
+(processing), `DRAW`
 (processing + texture upload + rendering), `FPS` decoded / shown / skipped
 (decoded but replaced by a newer frame before being shown), `DELAY` and
 `INPUT` (decoded picture size). `DELAY` is only an **estimate** of the
@@ -137,7 +162,7 @@ The values can also be passed on the command line:
 ```
 
 Defaults: angle 20.9°, k1 −0.26, k2 −0.05, ovfrac 0.844, preset B, both eyes,
-seam `auto`, 80 Mbps H.264.
+seam `auto`, 30 Mbps H.264.
 
 ## Build
 
@@ -204,8 +229,10 @@ Quest 3 (два «рыбьих глаза» рядом, с наклоном па
 | <kbd>-</kbd> <kbd>=</kbd>    | Распрямление `k1` ∓0.01 (прямые линии изогнуты)         |
 | <kbd>;</kbd> <kbd>'</kbd>    | Распрямление `k2` ∓0.01                                 |
 | <kbd>,</kbd> <kbd>.</kbd>    | Перекрытие глаз `ovfrac` ∓0.002 (шов двоит или расходится) |
-| <kbd>Q</kbd> / <kbd>Shift</kbd>+<kbd>Q</kbd> | Качество видео: следующий / предыдущий битрейт (16, 40, 80, 120, 200 Мбит/с) |
+| <kbd>Q</kbd> / <kbd>Shift</kbd>+<kbd>Q</kbd> | Качество видео: следующий / предыдущий битрейт (16, 30, 50, 80, 120, 200 Мбит/с) |
 | <kbd>H</kbd>                 | Кодек: H.264 ↔ H.265 (H.265 декодируется программно: медленнее, добавляет задержку) |
+| <kbd>T</kbd>                 | Потоки декодера: авто → 1 → 2 → 3 → 4 → 6              |
+| <kbd>V</kbd>                 | Аппаратное декодирование (VideoToolbox, экспериментально) вкл/выкл |
 | <kbd>F</kbd>                 | Полный экран                                            |
 | <kbd>M</kbd>                 | Растянуть окно на весь экран                            |
 | <kbd>P</kbd>                 | Строка производительности (также раз в секунду печатается в терминал) |
@@ -230,28 +257,51 @@ Quest 3 (два «рыбьих глаза» рядом, с наклоном па
 
 **Качество видео.** Картинка рассыпается квадратами из-за битрейта кодировщика:
 стандартные для scrcpy 8 Мбит/с слишком малы для экрана Quest, поэтому в
-режиме `--quest` по умолчанию **80 Мбит/с** (если не задан
-`-b`/`--video-bit-rate`). Параметры кодировщика нельзя менять на идущем
-потоке, поэтому <kbd>Q</kbd>/<kbd>H</kbd> перезапускают трансляцию с новыми
+режиме `--quest` по умолчанию **30 Мбит/с** (если не задан
+`-b`/`--video-bit-rate`). Параметры кодировщика и декодера нельзя менять на
+идущем потоке, поэтому <kbd>Q</kbd>/<kbd>H</kbd>/<kbd>T</kbd>/<kbd>V</kbd> перезапускают трансляцию с новыми
 значениями примерно через секунду после последнего нажатия: окно закрывается и
 за пару секунд открывается на том же месте, остальные настройки сохраняются. В
 строке значений видны запрошенный битрейт, кодек и реально приходящий битрейт
 (`ACTUAL`; на неподвижной картинке кодировщик выдаёт меньше). Новое качество
 запоминается, только когда с ним пришла картинка: если кодировщик шлема не
-принял настройку (например, H.265), scrcpy завершится, а следующий запуск
-возьмёт прежние рабочие значения.
+принял настройку, scrcpy завершится, а следующий запуск возьмёт прежние
+рабочие значения. Кодек не запоминается никогда (H.264, если не задан
+`--video-codec`). Действующие значения печатаются при старте
+(`Quest stream: …`).
 
-**Задержка.** Оставляйте **H.264** (по умолчанию): на Mac H.265 декодируется
-программно (в статической сборке нет аппаратного декодирования), для такого
-размера кадра это слишком медленно и даёт заметную задержку; в строке значений
-он помечен `(SLOWER)`. Кроме того, кодировщик H.265 в Quest не принимает
+**Задержка.** Кадры большие (4128×2208 при частоте до 90 кадров/с), и чем
+выше битрейт, тем дольше декодируется каждый кадр. Когда декодер медленнее
+потока, кадры копятся перед ним в очереди и задержка растёт до сотен
+миллисекунд: по замеру на Mac с Apple Silicon один поток успевает за H.264 на
+30 Мбит/с, но не на 40 (~13 мс на кадр). Поэтому:
+
+ - до 32 Мбит/с работает один поток декодера (наименьшая задержка);
+ - выше потоки добавляются автоматически (2 до 56 Мбит/с, 3 до 90, 4 до 130,
+   дальше 6): с N потоками декодер быстрее до N раз, но выдаёт кадры с
+   опозданием на N−1 кадр (~13 мс каждый при 78 кадрах/с). <kbd>T</kbd> или
+   `--quest-decode-threads=N` задаёт число вручную;
+ - <kbd>V</kbd> или `--quest-hwdec=on` включает аппаратное декодирование
+   через VideoToolbox (только macOS, **экспериментально**: на настоящем Mac
+   со шлемом не проверено). Если работает — это самый быстрый вариант на любом
+   битрейте; в строке производительности тогда видно `(HW)`;
+ - если в строке производительности `LOAD` около 100 % `(TOO SLOW)` или растёт
+   `DELAY`, декодер не успевает: добавьте потоки (<kbd>T</kbd>), снизьте
+   качество (<kbd>Shift</kbd>+<kbd>Q</kbd>) или ограничьте частоту кадров
+   (`--max-fps=60`).
+
+Оставляйте **H.264** (по умолчанию): на Mac H.265 без аппаратного
+декодирования декодируется программно, для такого размера кадра это слишком
+медленно и даёт заметную задержку; в строке значений он помечен `(SLOWER)`.
+Кроме того, кодировщик H.265 в Quest не принимает
 полную ширину 4128 пикселей, поэтому с H.265 размер ограничивается 4096
 (меняется через `--max-size`); если кодировщик не справился, шлем молча
 повторяет с намного меньшей картинкой: реальный размер пишется в лог
 (`Quest input: WxH`) и виден в строке производительности.
 
 **Строка производительности** (<kbd>P</kbd> или `--quest-perf`):
-`DECODE` (мс на кадр в декодере), `QUEST` (обработка), `DRAW` (обработка +
+`DECODE` (мс на кадр в декодере, число потоков или `HW`, и `LOAD` — доля
+времени, которую его поток занят декодированием), `QUEST` (обработка), `DRAW` (обработка +
 загрузка текстуры + отрисовка), `FPS` декодировано / показано / пропущено
 (декодирован, но заменён более новым кадром до показа), `DELAY` и `INPUT`
 (размер декодированного кадра). `DELAY` — только **оценка** добавочной
@@ -288,7 +338,7 @@ Quest 3 (два «рыбьих глаза» рядом, с наклоном па
 ```
 
 По умолчанию: угол 20.9°, k1 −0.26, k2 −0.05, ovfrac 0.844, пресет B, оба
-глаза, шов `auto`, 80 Мбит/с H.264.
+глаза, шов `auto`, 30 Мбит/с H.264.
 
 ---
 

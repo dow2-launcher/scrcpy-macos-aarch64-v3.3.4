@@ -73,7 +73,9 @@ _scrcpy() {
         --push-target=
         --quest
         --quest-angle=
+        --quest-decode-threads=
         --quest-eye=
+        --quest-hwdec=
         --quest-k1=
         --quest-k2=
         --quest-no-config

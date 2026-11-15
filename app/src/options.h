@@ -262,6 +262,8 @@ enum sc_quest_seam {
 #define SC_QUEST_SET_SEAM 0x40
 #define SC_QUEST_SET_SEAM_X 0x80
 #define SC_QUEST_SET_CODEC 0x100
+#define SC_QUEST_SET_DECODE_THREADS 0x200
+#define SC_QUEST_SET_HWDEC 0x400
 
 #define SC_QUEST_PARAMS_DEFAULT { \
     .angle = 20.9f, \
@@ -272,8 +274,10 @@ enum sc_quest_seam {
     .eye = SC_QUEST_EYE_BOTH, \
     .seam = SC_QUEST_SEAM_AUTO, \
     .seam_x = 0.f, \
-    .bit_rate = 80000000, \
+    .bit_rate = 30000000, \
     .codec = SC_CODEC_H264, \
+    .decode_threads = 0, \
+    .hwdec = false, \
 }
 
 // Parameters of the Meta Quest viewing mode (--quest)
@@ -292,6 +296,12 @@ struct sc_quest_params {
     // low for the Quest display size)
     uint32_t bit_rate;
     enum sc_codec codec;
+    // Number of video decoding threads (0: automatic, from the bit rate).
+    // With N threads, the decoder is up to N times faster, but its output is
+    // delayed by N-1 frames.
+    uint8_t decode_threads;
+    // Hardware video decoding (VideoToolbox on macOS)
+    bool hwdec;
 };
 
 struct scrcpy_options {

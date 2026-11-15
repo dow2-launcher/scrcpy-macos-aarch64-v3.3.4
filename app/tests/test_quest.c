@@ -19,7 +19,7 @@ static const struct sc_quest_params default_params = {
     .k2 = -0.05f,
     .ovfrac = 0.844f,
     .preset = SC_QUEST_PRESET_B,
-    .bit_rate = 80000000,
+    .bit_rate = 50000000,
     .codec = SC_CODEC_H264,
 };
 
@@ -272,16 +272,21 @@ static void test_presets_and_keys(void) {
     assert(q.params.preset == SC_QUEST_PRESET_B);
 
     // Quality keys request a restart, they do not change the actual values
-    assert(q.params.bit_rate == 80000000);
+    assert(q.params.bit_rate == 50000000);
     assert(sc_quest_handle_key(&q, SDL_SCANCODE_Q, false));
     assert(sc_quest_is_restart_pending(&q));
-    assert(q.restart_bit_rate == 120000000);
+    assert(q.restart.bit_rate == 80000000);
     assert(sc_quest_handle_key(&q, SDL_SCANCODE_Q, true));
     assert(sc_quest_handle_key(&q, SDL_SCANCODE_Q, true));
-    assert(q.restart_bit_rate == 40000000);
+    assert(q.restart.bit_rate == 30000000);
+    assert(sc_quest_handle_key(&q, SDL_SCANCODE_T, false));
+    assert(q.restart.decode_threads == 1);
+    assert(sc_quest_get_auto_decode_threads(30000000) == 1);
+    assert(sc_quest_get_auto_decode_threads(40000000) == 2);
+    assert(sc_quest_get_auto_decode_threads(80000000) == 3);
     assert(sc_quest_handle_key(&q, SDL_SCANCODE_H, false));
-    assert(q.restart_codec == SC_CODEC_H265);
-    assert(q.params.bit_rate == 80000000);
+    assert(q.restart.codec == SC_CODEC_H265);
+    assert(q.params.bit_rate == 50000000);
     assert(q.params.codec == SC_CODEC_H264);
     // too early (the user may still be pressing keys)
     assert(!sc_quest_request_restart(&q, false, 0, 0, 100, 100));
@@ -394,6 +399,8 @@ static void test_config(void) {
         .seam_x = -0.042f,
         .bit_rate = 120000000,
         .codec = SC_CODEC_H265,
+        .decode_threads = 4,
+        .hwdec = true,
     };
     bool ok = sc_quest_config_save(path, &params);
     assert(ok);
@@ -402,6 +409,8 @@ static void test_config(void) {
     ok = sc_quest_config_load(path, &loaded);
     assert(ok);
     (void) ok;
+    assert(loaded.codec == SC_CODEC_H264);
+    loaded.codec = SC_CODEC_H265;
     assert(loaded.angle > 21.29f && loaded.angle < 21.31f);
     assert(loaded.k1 > -0.311f && loaded.k1 < -0.309f);
     assert(loaded.k2 > 0.019f && loaded.k2 < 0.021f);
@@ -418,9 +427,12 @@ static void test_config(void) {
                         "--quest-k2=0.02 --quest-ovfrac=0.852 "
                         "--quest-preset=C --quest-eye=right "
                         "--quest-seam=fixed --quest-seam-x=-0.042 "
-                        "--video-bit-rate=120000000 --video-codec=h265"));
+                        "--video-bit-rate=120000000 --video-codec=h265 "
+                        "--quest-decode-threads=4 --quest-hwdec=on"));
+    assert(loaded.decode_threads == 4);
+    assert(loaded.hwdec);
     assert(loaded.bit_rate == 120000000);
-    assert(loaded.codec == SC_CODEC_H265);
+    // the codec is not remembered
 
     remove(path);
     assert(!sc_quest_config_load(path, &loaded));

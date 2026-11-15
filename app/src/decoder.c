@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <libavcodec/packet.h>
 #include <libavutil/avutil.h>
+#include <libavutil/pixfmt.h>
 
 #include "quest.h"
 #include "util/log.h"
@@ -19,6 +20,9 @@ sc_decoder_open(struct sc_decoder *decoder, AVCodecContext *ctx) {
         return false;
     }
 
+    decoder->sw_frame = NULL;
+    decoder->hw_tmp_frame = NULL;
+
     if (!sc_frame_source_sinks_open(&decoder->frame_source, ctx)) {
         av_frame_free(&decoder->frame);
         return false;
@@ -33,6 +37,8 @@ static void
 sc_decoder_close(struct sc_decoder *decoder) {
     sc_frame_source_sinks_close(&decoder->frame_source);
     av_frame_free(&decoder->frame);
+    av_frame_free(&decoder->sw_frame);
+    av_frame_free(&decoder->hw_tmp_frame);
 }
 
 static bool
@@ -66,15 +72,37 @@ sc_decoder_push(struct sc_decoder *decoder, const AVPacket *packet) {
         }
 
         // a frame was received
+        AVFrame *frame = decoder->frame;
+        if (frame->format == AV_PIX_FMT_VIDEOTOOLBOX) {
+            // Hardware frame (Meta Quest viewing mode with hardware decoding)
+            if (!decoder->sw_frame) {
+                decoder->sw_frame = av_frame_alloc();
+                decoder->hw_tmp_frame = av_frame_alloc();
+                if (!decoder->sw_frame || !decoder->hw_tmp_frame) {
+                    LOG_OOM();
+                    return false;
+                }
+            }
+            if (!sc_quest_download_frame(frame, decoder->hw_tmp_frame,
+                                         decoder->sw_frame)) {
+                LOGE("Decoder '%s': could not download the hardware frame",
+                     decoder->name);
+                return false;
+            }
+            frame = decoder->sw_frame;
+        }
+
         if (is_video) {
             // For the performance line of the Meta Quest viewing mode
             sc_tick now = sc_tick_now();
-            sc_quest_stats_on_frame(decoder->frame->pts, now - start, now);
+            sc_quest_stats_on_frame(frame->pts, now - start, now);
             start = now;
         }
 
-        bool ok = sc_frame_source_sinks_push(&decoder->frame_source,
-                                             decoder->frame);
+        bool ok = sc_frame_source_sinks_push(&decoder->frame_source, frame);
+        if (frame != decoder->frame) {
+            av_frame_unref(frame);
+        }
         av_frame_unref(decoder->frame);
         if (!ok) {
             // Error already logged

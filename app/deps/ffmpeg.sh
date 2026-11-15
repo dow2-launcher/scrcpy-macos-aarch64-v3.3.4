@@ -81,6 +81,16 @@ else
         --enable-muxer=wav
     )
 
+    if [[ "$HOST" == macos ]]
+    then
+        # Hardware decoding (used by the Meta Quest viewing mode)
+        conf+=(
+            --enable-videotoolbox
+            --enable-hwaccel=h264_videotoolbox
+            --enable-hwaccel=hevc_videotoolbox
+        )
+    fi
+
     if [[ "$HOST" == linux ]]
     then
         conf+=(

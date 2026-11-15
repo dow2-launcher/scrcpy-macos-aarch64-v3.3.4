@@ -125,6 +125,8 @@ enum {
     OPT_QUEST_NO_CONFIG,
     OPT_QUEST_SEAM_X,
     OPT_QUEST_PERF,
+    OPT_QUEST_DECODE_THREADS,
+    OPT_QUEST_HWDEC,
 };
 
 struct sc_option {
@@ -826,16 +828,39 @@ static const struct sc_option options[] = {
                 "and restored on the next run (the command line options take "
                 "precedence). On every change, the equivalent command line is "
                 "printed to the console.\n"
-                "In this mode, the default video bit rate is 80M (instead of "
+                "In this mode, the default video bit rate is 30M (instead of "
                 "8M). The video quality can be changed from the window: Q "
-                "and Shift+Q select the next/previous bit rate (16M, 40M, "
-                "80M, 120M, 200M), H toggles the codec (h264/h265; h265 is "
-                "decoded more slowly, so it adds latency). The mirroring is "
-                "restarted to apply the new encoding parameters (they are "
-                "remembered too).\n"
+                "and Shift+Q select the next/previous bit rate (16M, 30M, "
+                "50M, 80M, 120M, 200M), H toggles the codec (h264/h265; h265 "
+                "is decoded more slowly, so it adds latency), T cycles the "
+                "number of decoding threads, V toggles hardware decoding. "
+                "The mirroring is restarted to apply these parameters (they "
+                "are remembered, except the codec).\n"
                 "F toggles fullscreen, M resizes the window to fill the "
                 "screen, P toggles the performance line.\n"
                 "Mouse and touch events are not forwarded in this mode.",
+    },
+    {
+        .longopt_id = OPT_QUEST_DECODE_THREADS,
+        .longopt = "quest-decode-threads",
+        .argdesc = "value",
+        .text = "Set the number of video decoding threads for --quest "
+                "(between 0 and 16). A single thread gives the lowest "
+                "latency, but it may be too slow for high bit rates (then "
+                "the stream is delayed more and more). With N threads, the "
+                "decoder is up to N times faster, but its output is delayed "
+                "by N-1 frames.\n"
+                "Default is 0 (automatic: 1 thread up to 32 Mbps, more "
+                "above).",
+    },
+    {
+        .longopt_id = OPT_QUEST_HWDEC,
+        .longopt = "quest-hwdec",
+        .argdesc = "value",
+        .text = "Enable or disable hardware video decoding for --quest "
+                "(experimental, macOS only, via VideoToolbox).\n"
+                "Possible values are \"on\" and \"off\".\n"
+                "Default is off.",
     },
     {
         .longopt_id = OPT_QUEST_EYE,
@@ -2827,6 +2852,30 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                     return false;
                 }
                 opts->quest_set |= SC_QUEST_SET_SEAM_X;
+                opts->quest = true;
+                break;
+            case OPT_QUEST_DECODE_THREADS: {
+                long value;
+                if (!parse_integer_arg(optarg, &value, false, 0, 16,
+                                       "quest decode threads")) {
+                    return false;
+                }
+                opts->quest_params.decode_threads = value;
+                opts->quest_set |= SC_QUEST_SET_DECODE_THREADS;
+                opts->quest = true;
+                break;
+            }
+            case OPT_QUEST_HWDEC:
+                if (!strcmp(optarg, "on")) {
+                    opts->quest_params.hwdec = true;
+                } else if (!strcmp(optarg, "off")) {
+                    opts->quest_params.hwdec = false;
+                } else {
+                    LOGE("Unsupported quest hwdec value: %s (expected on or "
+                         "off)", optarg);
+                    return false;
+                }
+                opts->quest_set |= SC_QUEST_SET_HWDEC;
                 opts->quest = true;
                 break;
             case OPT_QUEST_PERF:

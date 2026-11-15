@@ -22,8 +22,11 @@ Keys in the window (US layout positions, hold Shift for bigger steps):
     - =       lens correction k1 -/+ 0.01
     ; '       lens correction k2 -/+ 0.01
     , .       eyes overlap -/+ 0.002
-    Q         video quality: next bit rate 16/40/80/120/200 Mbps (Shift+Q:
-              previous); default 80 Mbps; the mirroring restarts to apply it
+    Q         video quality: next bit rate 16/30/50/80/120/200 Mbps (Shift+Q:
+              previous); default 30 Mbps; the mirroring restarts to apply it
+    T         decoding threads auto/1/2/3/4/6 (more threads if the decoder
+              is too slow: "LOAD ~100% (TOO SLOW)" in the performance line)
+    V         hardware decoding (VideoToolbox, experimental) on/off
     H         video codec H.264 / H.265 (restarts too; H.265 is slower on a
               Mac and adds latency: keep H.264)
     F         fullscreen
@@ -63,8 +66,11 @@ next run. The equivalent command line is printed on every change, e.g.:
     - =       распрямление k1 -/+ 0.01
     ; '       распрямление k2 -/+ 0.01
     , .       перекрытие глаз -/+ 0.002
-    Q         качество: следующий битрейт 16/40/80/120/200 Мбит/с (Shift+Q —
-              предыдущий); по умолчанию 80; трансляция перезапускается
+    Q         качество: следующий битрейт 16/30/50/80/120/200 Мбит/с (Shift+Q —
+              предыдущий); по умолчанию 30; трансляция перезапускается
+    T         потоки декодера авто/1/2/3/4/6 (больше потоков, если декодер не
+              успевает: "LOAD ~100% (TOO SLOW)" в строке производительности)
+    V         аппаратное декодирование (VideoToolbox, экспериментально)
     H         кодек H.264 / H.265 (тоже с перезапуском; H.265 на Mac медленнее
               и даёт задержку: оставляйте H.264)
     F         полный экран

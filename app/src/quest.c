@@ -1,11 +1,14 @@
 #include "quest.h"
 
+#include "util/log.h"
+
 #include <assert.h>
 #include <inttypes.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <libavutil/hwcontext.h>
 #include <libavutil/pixfmt.h>
 #include <SDL2/SDL_cpuinfo.h>
 #include <sys/stat.h>
@@ -43,12 +46,146 @@ sc_quest_stats_on_frame(int64_t pts, sc_tick decode_duration, sc_tick now) {
 
 // Video bit rates selectable live
 static const uint32_t bit_rates[] = {
-    16000000, 40000000, 80000000, 120000000, 200000000,
+    16000000, 30000000, 50000000, 80000000, 120000000, 200000000,
 };
+
+struct sc_quest_decode sc_quest_decode;
+
+unsigned
+sc_quest_get_auto_decode_threads(uint32_t bit_rate) {
+    // Measured on an Apple Silicon Mac with the Quest 3 (4128x2208, ~78 fps):
+    // a single thread decodes H.264 at 30 Mbps in time, but not at 40 Mbps
+    // (~13 ms per frame, so the stream is delayed more and more)
+    if (bit_rate <= 32000000) {
+        return 1;
+    }
+    if (bit_rate <= 56000000) {
+        return 2;
+    }
+    if (bit_rate <= 90000000) {
+        return 3;
+    }
+    if (bit_rate <= 130000000) {
+        return 4;
+    }
+    return 6;
+}
+
+#ifdef __APPLE__
+static enum AVPixelFormat
+sc_quest_get_format(AVCodecContext *ctx, const enum AVPixelFormat *formats) {
+    for (const enum AVPixelFormat *f = formats; *f != AV_PIX_FMT_NONE; ++f) {
+        if (*f == AV_PIX_FMT_VIDEOTOOLBOX) {
+            return *f;
+        }
+    }
+
+    LOGW("Quest: hardware decoding not available for this stream, using "
+         "software decoding");
+    return avcodec_default_get_format(ctx, formats);
+}
+#endif
+
+void
+sc_quest_configure_decoder(AVCodecContext *ctx) {
+    if (sc_quest_decode.hwdec) {
+#ifdef __APPLE__
+        AVBufferRef *device = NULL;
+        int r = av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+                                       NULL, NULL, 0);
+        if (!r) {
+            ctx->hw_device_ctx = device;
+            ctx->get_format = sc_quest_get_format;
+            LOGI("Quest: hardware decoding requested (VideoToolbox)");
+            // No need for several threads
+            return;
+        }
+        LOGW("Quest: could not initialize VideoToolbox (%d), using software "
+             "decoding", r);
+#else
+        LOGW("Quest: hardware decoding is only supported on macOS");
+#endif
+    }
+
+    if (sc_quest_decode.threads > 1) {
+        ctx->thread_count = sc_quest_decode.threads;
+        ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+        // FFmpeg disables frame threading in low delay mode (its output is
+        // delayed by thread_count - 1 frames)
+        ctx->flags &= ~AV_CODEC_FLAG_LOW_DELAY;
+    }
+}
+
+bool
+sc_quest_download_frame(const AVFrame *hw_frame, AVFrame *tmp, AVFrame *out) {
+    av_frame_unref(tmp);
+    av_frame_unref(out);
+
+    // The default software format is used (NV12 for VideoToolbox)
+    int r = av_hwframe_transfer_data(tmp, hw_frame, 0);
+    if (r) {
+        LOGE("Quest: could not transfer the hardware frame: %d", r);
+        return false;
+    }
+
+    atomic_store_explicit(&sc_quest_decode.hwdec_active, true,
+                          memory_order_relaxed);
+
+    if (tmp->format == AV_PIX_FMT_YUV420P) {
+        av_frame_move_ref(out, tmp);
+        return !av_frame_copy_props(out, hw_frame);
+    }
+
+    if (tmp->format != AV_PIX_FMT_NV12 || !tmp->buf[0]) {
+        LOGE("Quest: unsupported hardware frame format: %d", tmp->format);
+        return false;
+    }
+
+    // NV12 to YUV420P: share the luma plane, deinterleave the chroma plane
+    int cw = (tmp->width + 1) / 2;
+    int ch = (tmp->height + 1) / 2;
+    int stride = (cw + 63) & ~63;
+
+    out->buf[0] = av_buffer_ref(tmp->buf[0]);
+    out->buf[1] = av_buffer_alloc((size_t) stride * ch * 2 + 64);
+    if (!out->buf[0] || !out->buf[1]) {
+        LOG_OOM();
+        av_frame_unref(out);
+        return false;
+    }
+
+    out->format = AV_PIX_FMT_YUV420P;
+    out->width = tmp->width;
+    out->height = tmp->height;
+    out->data[0] = tmp->data[0];
+    out->linesize[0] = tmp->linesize[0];
+    out->data[1] = out->buf[1]->data;
+    out->data[2] = out->buf[1]->data + (size_t) stride * ch;
+    out->linesize[1] = stride;
+    out->linesize[2] = stride;
+
+    for (int y = 0; y < ch; ++y) {
+        const uint8_t *src = tmp->data[1] + (size_t) y * tmp->linesize[1];
+        uint8_t *u = out->data[1] + (size_t) y * stride;
+        uint8_t *v = out->data[2] + (size_t) y * stride;
+        for (int x = 0; x < cw; ++x) {
+            u[x] = src[2 * x];
+            v[x] = src[2 * x + 1];
+        }
+    }
+
+    if (av_frame_copy_props(out, hw_frame)) {
+        av_frame_unref(out);
+        return false;
+    }
+
+    av_frame_unref(tmp);
+    return true;
+}
 
 static struct {
     bool requested;
-    char args[512];
+    char args[640];
 } sc_quest_restart;
 
 #include "util/log.h"
@@ -286,6 +423,9 @@ sc_quest_sanitize_params(struct sc_quest_params *params) {
     if (params->bit_rate < 1000000) {
         params->bit_rate = 1000000;
     }
+    if (params->decode_threads > 16) {
+        params->decode_threads = 16;
+    }
     if (params->codec != SC_CODEC_H264 && params->codec != SC_CODEC_H265
             && params->codec != SC_CODEC_AV1) {
         params->codec = SC_CODEC_H264;
@@ -310,11 +450,13 @@ sc_quest_format_cli(const struct sc_quest_params *params, char *buf,
     snprintf(buf, size, "--quest --quest-angle=%.1f --quest-k1=%.2f "
                         "--quest-k2=%.2f --quest-ovfrac=%.3f --quest-preset=%c "
                         "--quest-eye=%s --quest-seam=%s --quest-seam-x=%.3f "
-                        "--video-bit-rate=%" PRIu32 " --video-codec=%s",
+                        "--video-bit-rate=%" PRIu32 " --video-codec=%s "
+                        "--quest-decode-threads=%u --quest-hwdec=%s",
              params->angle, params->k1, params->k2, params->ovfrac,
              'A' + params->preset, eye_names[params->eye],
              seam_names[params->seam], params->seam_x, params->bit_rate,
-             codec_name(params->codec));
+             codec_name(params->codec), (unsigned) params->decode_threads,
+             params->hwdec ? "on" : "off");
 }
 
 /* Config file */
@@ -400,14 +542,14 @@ sc_quest_config_load(const char *path, struct sc_quest_params *params) {
         } else if (!strcmp(key, "bitrate") && is_float && f >= 1e6f
                 && f <= 1e9f) {
             params->bit_rate = (uint32_t) f;
-        } else if (!strcmp(key, "codec")) {
-            if (!strcmp(value, "h264")) {
-                params->codec = SC_CODEC_H264;
-            } else if (!strcmp(value, "h265")) {
-                params->codec = SC_CODEC_H265;
-            } else if (!strcmp(value, "av1")) {
-                params->codec = SC_CODEC_AV1;
-            }
+        } else if (!strcmp(key, "threads") && is_float && f >= 0
+                && f <= 16) {
+            params->decode_threads = (uint8_t) f;
+        } else if (!strcmp(key, "hwdec")) {
+            params->hwdec = !strcmp(value, "on");
+            // The codec is intentionally not remembered: a slow codec (H.265
+            // is decoded in software) used once must not silently add latency
+            // to the next runs
         } else if (!strcmp(key, "preset") && value[0] >= 'A'
                 && value[0] <= 'D' && !value[1]) {
             params->preset = SC_QUEST_PRESET_A + (value[0] - 'A');
@@ -450,11 +592,12 @@ sc_quest_config_save(const char *path, const struct sc_quest_params *params) {
                   "seam=%s\n"
                   "seamx=%.3f\n"
                   "bitrate=%" PRIu32 "\n"
-                  "codec=%s\n",
+                  "threads=%u\n"
+                  "hwdec=%s\n",
             cli, params->angle, params->k1, params->k2, params->ovfrac,
             'A' + params->preset, eye_names[params->eye],
             seam_names[params->seam], params->seam_x, params->bit_rate,
-            codec_name(params->codec));
+            (unsigned) params->decode_threads, params->hwdec ? "on" : "off");
 
     return !fclose(file);
 }
@@ -488,13 +631,30 @@ sc_quest_resolve_options(struct scrcpy_options *opts) {
         }
     }
 
-    // The values set on the command line take precedence
+    // The value set on the command line takes precedence
+    const char *bit_rate_source = "command line";
     if (!opts->video_bit_rate) {
+        bit_rate_source =
+            params.bit_rate == opts->quest_params.bit_rate ? "default"
+                                                           : "saved";
         opts->video_bit_rate = params.bit_rate;
     }
-    if (!(opts->quest_set & SC_QUEST_SET_CODEC)) {
-        opts->video_codec = params.codec;
-    }
+    // The codec is never loaded from the config file: it is H.264 unless
+    // requested on the command line
+
+    uint8_t decode_threads = opts->quest_set & SC_QUEST_SET_DECODE_THREADS
+                           ? opts->quest_params.decode_threads
+                           : params.decode_threads;
+    bool hwdec = opts->quest_set & SC_QUEST_SET_HWDEC
+               ? opts->quest_params.hwdec : params.hwdec;
+    opts->quest_params.decode_threads = decode_threads;
+    opts->quest_params.hwdec = hwdec;
+
+    sc_quest_decode.threads = decode_threads
+                            ? decode_threads
+                            : sc_quest_get_auto_decode_threads(
+                                    opts->video_bit_rate);
+    sc_quest_decode.hwdec = hwdec;
 
     if (opts->video_codec == SC_CODEC_H265 && !opts->max_size) {
         // The display is 4128 pixels wide, but H.265 hardware encoders are
@@ -503,6 +663,18 @@ sc_quest_resolve_options(struct scrcpy_options *opts) {
         LOGI("Quest: limiting the video size to 4096 for H.265 "
              "(use --max-size to change it)");
         opts->max_size = 4096;
+    }
+
+    // Print the effective encoding parameters, they impact the latency
+    LOGI("Quest stream: codec=%s%s, bit-rate=%" PRIu32 " (%s), max-size=%u, "
+         "max-fps=%s, decode-threads=%u%s, hwdec=%s",
+         codec_name(opts->video_codec),
+         opts->video_codec == SC_CODEC_H264 ? "" : " (slower decoding)",
+         opts->video_bit_rate, bit_rate_source, (unsigned) opts->max_size,
+         opts->max_fps ? opts->max_fps : "unlimited", sc_quest_decode.threads,
+         decode_threads ? "" : " (auto)", hwdec ? "on" : "off");
+    if (opts->video_buffer) {
+        LOGW("Quest: --video-buffer adds latency");
     }
 
     // The actual values (displayed, and saved once they are known to work)
@@ -526,8 +698,10 @@ sc_quest_request_restart(struct sc_quest *q, bool fullscreen, int x, int y,
     q->restart_pending = false;
     q->overlay_dirty = true;
 
-    if (q->restart_bit_rate == q->params.bit_rate
-            && q->restart_codec == q->params.codec) {
+    if (q->restart.bit_rate == q->params.bit_rate
+            && q->restart.codec == q->params.codec
+            && q->restart.decode_threads == q->params.decode_threads
+            && q->restart.hwdec == q->params.hwdec) {
         // Nothing to change
         return false;
     }
@@ -540,10 +714,12 @@ sc_quest_request_restart(struct sc_quest *q, bool fullscreen, int x, int y,
     // The new values are saved to the config file by the new instance, only
     // once they are known to work (a first frame has been received)
     struct sc_quest_params params = q->params;
-    params.bit_rate = q->restart_bit_rate;
-    params.codec = q->restart_codec;
+    params.bit_rate = q->restart.bit_rate;
+    params.codec = q->restart.codec;
+    params.decode_threads = q->restart.decode_threads;
+    params.hwdec = q->restart.hwdec;
 
-    char cli[320];
+    char cli[400];
     sc_quest_format_cli(&params, cli, sizeof(cli));
 
     char window[128] = "";
@@ -658,8 +834,7 @@ sc_quest_init(struct sc_quest *q, const struct sc_quest_params *params,
 
     // (the bit rate and the codec are the actual ones, never loaded here)
     sc_quest_sanitize_params(&q->params);
-    q->restart_bit_rate = q->params.bit_rate;
-    q->restart_codec = q->params.codec;
+    q->restart = q->params;
     q->processing = true;
     q->overlay = true;
     q->overlay_dirty = true;
@@ -1466,6 +1641,8 @@ sc_quest_is_key(SDL_Scancode scancode) {
         case SDL_SCANCODE_6:
         case SDL_SCANCODE_Q:
         case SDL_SCANCODE_H:
+        case SDL_SCANCODE_T:
+        case SDL_SCANCODE_V:
         case SDL_SCANCODE_F:
         case SDL_SCANCODE_M:
         case SDL_SCANCODE_P:
@@ -1534,7 +1711,7 @@ sc_quest_handle_key(struct sc_quest *q, SDL_Scancode scancode, bool shift) {
             if (shift) {
                 index = 0;
                 for (int i = count - 1; i >= 0; --i) {
-                    if (bit_rates[i] < q->restart_bit_rate) {
+                    if (bit_rates[i] < q->restart.bit_rate) {
                         index = i;
                         break;
                     }
@@ -1542,24 +1719,46 @@ sc_quest_handle_key(struct sc_quest *q, SDL_Scancode scancode, bool shift) {
             } else {
                 index = count - 1;
                 for (int i = 0; i < count; ++i) {
-                    if (bit_rates[i] > q->restart_bit_rate) {
+                    if (bit_rates[i] > q->restart.bit_rate) {
                         index = i;
                         break;
                     }
                 }
             }
-            q->restart_bit_rate = bit_rates[index];
+            q->restart.bit_rate = bit_rates[index];
             q->restart_pending = true;
             q->restart_date = sc_tick_now();
             q->overlay_dirty = true;
             return true;
         }
+        case SDL_SCANCODE_T: {
+            // auto -> 1 -> 2 -> 3 -> 4 -> 6 -> auto
+            static const uint8_t values[] = {0, 1, 2, 3, 4, 6};
+            size_t index = 0;
+            for (size_t i = 0; i < ARRAY_LEN(values); ++i) {
+                if (values[i] == q->restart.decode_threads) {
+                    index = (i + 1) % ARRAY_LEN(values);
+                    break;
+                }
+            }
+            q->restart.decode_threads = values[index];
+            q->restart_pending = true;
+            q->restart_date = sc_tick_now();
+            q->overlay_dirty = true;
+            return true;
+        }
+        case SDL_SCANCODE_V:
+            q->restart.hwdec = !q->restart.hwdec;
+            q->restart_pending = true;
+            q->restart_date = sc_tick_now();
+            q->overlay_dirty = true;
+            return true;
         case SDL_SCANCODE_P:
             q->perf = !q->perf;
             q->overlay_dirty = true;
             return true;
         case SDL_SCANCODE_H:
-            q->restart_codec = q->restart_codec == SC_CODEC_H264
+            q->restart.codec = q->restart.codec == SC_CODEC_H264
                              ? SC_CODEC_H265 : SC_CODEC_H264;
             q->restart_pending = true;
             q->restart_date = sc_tick_now();
@@ -1587,11 +1786,12 @@ sc_quest_handle_key(struct sc_quest *q, SDL_Scancode scancode, bool shift) {
             static const struct sc_quest_params defaults =
                 SC_QUEST_PARAMS_DEFAULT;
             // (the bit rate and the codec are the actual ones, keep them)
-            uint32_t bit_rate = p->bit_rate;
-            enum sc_codec codec = p->codec;
+            struct sc_quest_params current = *p;
             *p = defaults;
-            p->bit_rate = bit_rate;
-            p->codec = codec;
+            p->bit_rate = current.bit_rate;
+            p->codec = current.codec;
+            p->decode_threads = current.decode_threads;
+            p->hwdec = current.hwdec;
             q->seam_valid = false;
             break;
         }
@@ -1824,18 +2024,31 @@ sc_quest_update_perf(struct sc_quest *q) {
                          ? (q->process_us - q->perf_last.process_us) / 1000.f
                                 / shown
                          : 0;
+        // Fraction of the time spent in the decoder by its calling thread: if
+        // it is close to 100%, the decoder is too slow for this stream, the
+        // packets wait before being decoded (the delay increases)
+        float load = (decode_us - q->perf_last.decode_us) * 100.f / elapsed;
+        char decoder[24];
+        if (atomic_load_explicit(&sc_quest_decode.hwdec_active,
+                                 memory_order_relaxed)) {
+            snprintf(decoder, sizeof(decoder), "(HW)");
+        } else {
+            snprintf(decoder, sizeof(decoder), "(%u THR)",
+                     sc_quest_decode.threads ? sc_quest_decode.threads : 1);
+        }
+        q->decoder_too_slow = load >= 90;
         // The drawing duration includes the processing
         float draw_ms = shown
                       ? (q->draw_us - q->perf_last.draw_us) / 1000.f / shown
                       : 0;
 
         snprintf(q->perf_text, sizeof(q->perf_text),
-                 "PERF  DECODE %.1f MS  QUEST %.1f MS  DRAW %.1f MS  "
-                 "FPS %.0f DECODED / %.0f SHOWN / %.0f SKIPPED  "
+                 "PERF  DECODE %.1f MS %s LOAD %.0f%%%s  QUEST %.1f MS  "
+                 "DRAW %.1f MS  FPS %.0f DECODED / %.0f SHOWN / %.0f SKIPPED  "
                  "DELAY +%.0f MS  INPUT %dX%d",
-                 decode_ms, process_ms, draw_ms, decoded / seconds,
-                 shown / seconds, skipped / seconds, delay_ms, q->src_w,
-                 q->src_h);
+                 decode_ms, decoder, load, load >= 90 ? " (TOO SLOW)" : "",
+                 process_ms, draw_ms, decoded / seconds, shown / seconds,
+                 skipped / seconds, delay_ms, q->src_w, q->src_h);
 
         if (q->perf) {
             printf("[quest] %s  %s %.1f MBPS\n", q->perf_text,
@@ -1868,16 +2081,28 @@ sc_quest_render_overlay(struct sc_quest *q, int *w, int *h) {
     sc_quest_update_perf(q);
 
     // Software decoding of H.265 is slower (it adds latency)
-    char quality[112];
+    char quality[160];
     if (q->restarting || q->restart_pending) {
-        snprintf(quality, sizeof(quality), "QUALITY %uM %s%s - RESTARTING...",
-                 (unsigned) (q->restart_bit_rate / 1000000),
-                 codec_name(q->restart_codec),
-                 q->restart_codec == SC_CODEC_H264 ? "" : " (SLOWER)");
+        char threads[16] = "AUTO";
+        if (q->restart.decode_threads) {
+            snprintf(threads, sizeof(threads), "%u",
+                     (unsigned) q->restart.decode_threads);
+        }
+        snprintf(quality, sizeof(quality),
+                 "QUALITY %uM %s%s  THREADS %s  HWDEC %s - RESTARTING...",
+                 (unsigned) (q->restart.bit_rate / 1000000),
+                 codec_name(q->restart.codec),
+                 q->restart.codec == SC_CODEC_H264 ? "" : " (SLOWER)",
+                 threads, q->restart.hwdec ? "ON" : "OFF");
     } else {
-        snprintf(quality, sizeof(quality), "QUALITY %uM %s%s (ACTUAL %.1fM)",
+        snprintf(quality, sizeof(quality),
+                 "QUALITY %uM %s%s (ACTUAL %.1fM)%s",
                  (unsigned) (p->bit_rate / 1000000), codec_name(p->codec),
-                 p->codec == SC_CODEC_H264 ? "" : " (SLOWER)", q->rate_mbps);
+                 p->codec == SC_CODEC_H264 ? "" : " (SLOWER)", q->rate_mbps,
+                 q->decoder_too_slow
+                    ? "\nDECODER TOO SLOW (DELAY): T MORE THREADS, "
+                      "SHIFT+Q LOWER QUALITY"
+                    : "");
     }
 
     char text[832];
@@ -1896,7 +2121,7 @@ sc_quest_render_overlay(struct sc_quest *q, int *w, int *h) {
                  "QUEST VIEW %c  %s  %dX%d  %.1f MS\n"
                  "ANGLE %.1f  K1 %.2f  K2 %.2f  OVERLAP %.3f  %s\n"
                  "1-4 VIEW  5 EYE  6 SEAM MODE  7 NEW SEAM  8 9 MOVE SEAM"
-                 "  Q QUALITY  H CODEC\n"
+                 "  Q QUALITY  H CODEC  T THREADS  V HWDEC\n"
                  "[ ] ANGLE  - = K1  ; ' K2  , . OVERLAP  \\ RAW"
                  "  F FULLSCREEN  M FILL SCREEN  P PERF  0 DEFAULTS  / HIDE"
                  "%s%s",
