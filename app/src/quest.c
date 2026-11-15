@@ -53,22 +53,18 @@ struct sc_quest_decode sc_quest_decode;
 
 unsigned
 sc_quest_get_auto_decode_threads(uint32_t bit_rate) {
-    // Measured on an Apple Silicon Mac with the Quest 3 (4128x2208, ~78 fps):
-    // a single thread decodes H.264 at 30 Mbps in time, but not at 40 Mbps
-    // (~13 ms per frame, so the stream is delayed more and more)
-    if (bit_rate <= 32000000) {
-        return 1;
+    (void) bit_rate;
+    // The owner's choice (15.11): use all the CPU cores at once. With N frame
+    // threads the decoder is up to N times faster, its output is N-1 frames
+    // later (T cycles the number of threads from the window)
+    int cpus = SDL_GetCPUCount();
+    if (cpus < 1) {
+        cpus = 1;
     }
-    if (bit_rate <= 56000000) {
-        return 2;
+    if (cpus > 16) {
+        cpus = 16;
     }
-    if (bit_rate <= 90000000) {
-        return 3;
-    }
-    if (bit_rate <= 130000000) {
-        return 4;
-    }
-    return 6;
+    return (unsigned) cpus;
 }
 
 #ifdef __APPLE__
@@ -479,7 +475,7 @@ sc_quest_config_get_path(void) {
     }
 
     static const char dir[] = "/.config";
-    static const char name[] = "/scrcpy-quest.conf";
+    static const char name[] = "/scrcpy-quest2.conf";
     size_t len = strlen(home) + sizeof(dir) + sizeof(name);
     char *path = malloc(len);
     if (!path) {
@@ -629,6 +625,17 @@ sc_quest_resolve_options(struct scrcpy_options *opts) {
             sc_quest_config_load(path, &params);
             free(path);
         }
+    }
+
+    // No sound by default: the Quest gives none to scrcpy (15.11 research),
+    // the audio stream only costs time
+    if (!opts->quest_audio && opts->audio) {
+        LOGI("Quest: audio off (use --quest-audio to keep it)");
+        opts->audio = false;
+    }
+    // 60 fps at most by default
+    if (!opts->max_fps) {
+        opts->max_fps = "60";
     }
 
     // The value set on the command line takes precedence

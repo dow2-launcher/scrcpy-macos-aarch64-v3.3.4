@@ -125,6 +125,7 @@ enum {
     OPT_QUEST_NO_CONFIG,
     OPT_QUEST_SEAM_X,
     OPT_QUEST_PERF,
+    OPT_QUEST_AUDIO,
     OPT_QUEST_DECODE_THREADS,
     OPT_QUEST_HWDEC,
 };
@@ -824,12 +825,14 @@ static const struct sc_option options[] = {
                 "' change k2, , and . change the overlap (hold Shift for "
                 "bigger steps), \\ toggles the processing (raw buffer), / "
                 "toggles the text overlay, 0 resets the default values.\n"
-                "The last values are saved to ~/.config/scrcpy-quest.conf "
+                "The last values are saved to ~/.config/scrcpy-quest2.conf "
                 "and restored on the next run (the command line options take "
                 "precedence). On every change, the equivalent command line is "
                 "printed to the console.\n"
-                "In this mode, the default video bit rate is 30M (instead of "
-                "8M). The video quality can be changed from the window: Q "
+                "In this mode, the defaults are: no audio (see "
+                "--quest-audio), the left eye only, 60 fps at most "
+                "(--max-fps), a video bit rate of 30M (instead of 8M), "
+                "software decoding on all the CPU cores. The video quality can be changed from the window: Q "
                 "and Shift+Q select the next/previous bit rate (16M, 30M, "
                 "50M, 80M, 120M, 200M), H toggles the codec (h264/h265; h265 "
                 "is decoded more slowly, so it adds latency), T cycles the "
@@ -876,8 +879,15 @@ static const struct sc_option options[] = {
         .longopt_id = OPT_QUEST_NO_CONFIG,
         .longopt = "quest-no-config",
         .text = "Do not load or save the --quest parameters from/to the "
-                "config file (~/.config/scrcpy-quest.conf, or the path given "
+                "config file (~/.config/scrcpy-quest2.conf, or the path given "
                 "by the environment variable SCRCPY_QUEST_CONFIG).",
+    },
+    {
+        .longopt_id = OPT_QUEST_AUDIO,
+        .longopt = "quest-audio",
+        .text = "Keep the audio in --quest mode (by default, --quest disables "
+                "the audio: the Quest gives no sound to scrcpy, and the audio "
+                "stream only costs time).",
     },
     {
         .longopt_id = OPT_QUEST_PERF,
@@ -2880,6 +2890,10 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                 break;
             case OPT_QUEST_PERF:
                 opts->quest_perf = true;
+                opts->quest = true;
+                break;
+            case OPT_QUEST_AUDIO:
+                opts->quest_audio = true;
                 opts->quest = true;
                 break;
             case OPT_QUEST_NO_CONFIG:

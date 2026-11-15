@@ -144,7 +144,7 @@ If the picture looks rough when the window is much smaller than the video,
 try `--render-driver=opengl` (enables trilinear filtering).
 
 **The last values are remembered**: they are saved to
-`~/.config/scrcpy-quest.conf` on every change and restored on the next run
+`~/.config/scrcpy-quest2.conf` on every change and restored on the next run
 (command line options take precedence; `--quest-no-config` disables this).
 On every change, the equivalent command line is also printed to the terminal.
 
@@ -161,8 +161,11 @@ The values can also be passed on the command line:
          --quest-seam=fixed --quest-seam-x=0 -b 120M --video-codec=h265
 ```
 
-Defaults: angle 20.9°, k1 −0.26, k2 −0.05, ovfrac 0.844, preset B, both eyes,
-seam `auto`, 30 Mbps H.264.
+Defaults: angle 20.9°, k1 −0.26, k2 −0.05, ovfrac 0.844, preset B, **left eye
+only**, seam `auto`, 30 Mbps H.264, **60 fps at most**, **no audio**
+(`--quest-audio` keeps it), **software decoding on all the CPU cores** (hardware
+decoding off). The config file is `scrcpy-quest2.conf` since these defaults, so
+the values saved by older builds do not override them.
 
 ## Build
 
@@ -319,7 +322,7 @@ Quest 3 (два «рыбьих глаза» рядом, с наклоном па
 фильтрацию).
 
 **Последние значения запоминаются**: при каждом изменении они сохраняются в
-`~/.config/scrcpy-quest.conf` и подхватываются при следующем запуске (опции
+`~/.config/scrcpy-quest2.conf` и подхватываются при следующем запуске (опции
 командной строки главнее; `--quest-no-config` отключает это). При каждом
 изменении в терминал также печатается готовая командная строка.
 
@@ -337,8 +340,11 @@ Quest 3 (два «рыбьих глаза» рядом, с наклоном па
          --quest-seam=fixed --quest-seam-x=0 -b 120M --video-codec=h265
 ```
 
-По умолчанию: угол 20.9°, k1 −0.26, k2 −0.05, ovfrac 0.844, пресет B, оба
-глаза, шов `auto`, 30 Мбит/с H.264.
+По умолчанию: угол 20.9°, k1 −0.26, k2 −0.05, ovfrac 0.844, пресет B, **один
+(левый) глаз**, шов `auto`, 30 Мбит/с H.264, **не больше 60 fps**, **без звука**
+(`--quest-audio` оставляет звук), **программное декодирование на всех ядрах**
+(аппаратное выключено). Файл настроек с этих умолчаний — `scrcpy-quest2.conf`,
+чтобы значения, сохранённые старыми сборками, их не перебивали.
 
 ---
 

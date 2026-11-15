@@ -271,7 +271,7 @@ enum sc_quest_seam {
     .k2 = -0.05f, \
     .ovfrac = 0.844f, \
     .preset = SC_QUEST_PRESET_B, \
-    .eye = SC_QUEST_EYE_BOTH, \
+    .eye = SC_QUEST_EYE_LEFT, \
     .seam = SC_QUEST_SEAM_AUTO, \
     .seam_x = 0.f, \
     .bit_rate = 30000000, \
@@ -408,6 +408,7 @@ struct scrcpy_options {
     struct sc_quest_params quest_params;
     uint16_t quest_set; // OR of SC_QUEST_SET_* (set on the command line)
     bool quest_perf; // show the performance line on start
+    bool quest_audio; // keep the audio stream in --quest (off by default)
     bool quest_config; // load/save the parameters from/to the config file
 };
 
