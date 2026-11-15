@@ -10,6 +10,7 @@
 
 #include "cli.h"
 #include "options.h"
+#include "quest.h"
 #include "scrcpy.h"
 #include "usb/scrcpy_otg.h"
 #include "util/log.h"
@@ -86,11 +87,20 @@ main_scrcpy(int argc, char *argv[]) {
 
     sc_log_configure();
 
+    // Higher video quality by default in Meta Quest viewing mode
+    sc_quest_resolve_options(&args.opts);
+
 #ifdef HAVE_USB
     ret = args.opts.otg ? scrcpy_otg(&args.opts) : scrcpy(&args.opts);
 #else
     ret = scrcpy(&args.opts);
 #endif
+
+    if (ret == SCRCPY_EXIT_SUCCESS) {
+        // If a restart has been requested to apply new encoding parameters,
+        // replace the current process (this call does not return)
+        sc_quest_restart_exec(argc, argv);
+    }
 
 end:
     if (args.pause_on_exit == SC_PAUSE_ON_EXIT_TRUE ||

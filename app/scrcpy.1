@@ -473,6 +473,8 @@ The parameters can be adjusted live from the window: 1/2/3/4 select the view pre
 
 The last values are saved to ~/.config/scrcpy\-quest.conf and restored on the next run (the command line options take precedence). On every change, the equivalent command line is printed to the console.
 
+In this mode, the default video bit rate is 80M (instead of 8M). The video quality can be changed from the window: Q and Shift+Q select the next/previous bit rate (16M, 40M, 80M, 120M, 200M), H toggles the codec (h264/h265). The mirroring is restarted to apply the new encoding parameters (they are remembered too).
+
 Mouse and touch events are not forwarded in this mode.
 
 .TP

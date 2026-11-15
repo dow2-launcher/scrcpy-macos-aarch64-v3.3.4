@@ -6,6 +6,7 @@
 #include <libavutil/channel_layout.h>
 
 #include "packet_merger.h"
+#include "quest.h"
 #include "util/binary.h"
 #include "util/log.h"
 
@@ -246,6 +247,12 @@ run_demuxer(void *data) {
             // end of stream
             status = SC_DEMUXER_STATUS_EOS;
             break;
+        }
+
+        if (codec_ctx->codec_type == AVMEDIA_TYPE_VIDEO) {
+            // To report the actual video bit rate in Meta Quest viewing mode
+            atomic_fetch_add_explicit(&sc_quest_video_bytes, packet->size,
+                                      memory_order_relaxed);
         }
 
         if (must_merge_config_packet) {

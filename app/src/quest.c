@@ -1,6 +1,7 @@
 #include "quest.h"
 
 #include <assert.h>
+#include <inttypes.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,7 +11,21 @@
 #include <sys/stat.h>
 #ifdef _WIN32
 # include <direct.h>
+#else
+# include <unistd.h>
 #endif
+
+atomic_uint_least64_t sc_quest_video_bytes;
+
+// Video bit rates selectable live
+static const uint32_t bit_rates[] = {
+    16000000, 40000000, 80000000, 120000000, 200000000,
+};
+
+static struct {
+    bool requested;
+    char args[512];
+} sc_quest_restart;
 
 #include "util/log.h"
 
@@ -244,6 +259,25 @@ sc_quest_sanitize_params(struct sc_quest_params *params) {
     }
     params->seam_x = clampf(params->seam_x, -SC_QUEST_SEAM_X_MAX,
                             SC_QUEST_SEAM_X_MAX);
+    if (params->bit_rate < 1000000) {
+        params->bit_rate = 1000000;
+    }
+    if (params->codec != SC_CODEC_H264 && params->codec != SC_CODEC_H265
+            && params->codec != SC_CODEC_AV1) {
+        params->codec = SC_CODEC_H264;
+    }
+}
+
+static const char *
+codec_name(enum sc_codec codec) {
+    switch (codec) {
+        case SC_CODEC_H265:
+            return "h265";
+        case SC_CODEC_AV1:
+            return "av1";
+        default:
+            return "h264";
+    }
 }
 
 void
@@ -251,10 +285,12 @@ sc_quest_format_cli(const struct sc_quest_params *params, char *buf,
                     size_t size) {
     snprintf(buf, size, "--quest --quest-angle=%.1f --quest-k1=%.2f "
                         "--quest-k2=%.2f --quest-ovfrac=%.3f --quest-preset=%c "
-                        "--quest-eye=%s --quest-seam=%s --quest-seam-x=%.3f",
+                        "--quest-eye=%s --quest-seam=%s --quest-seam-x=%.3f "
+                        "--video-bit-rate=%" PRIu32 " --video-codec=%s",
              params->angle, params->k1, params->k2, params->ovfrac,
              'A' + params->preset, eye_names[params->eye],
-             seam_names[params->seam], params->seam_x);
+             seam_names[params->seam], params->seam_x, params->bit_rate,
+             codec_name(params->codec));
 }
 
 /* Config file */
@@ -337,6 +373,17 @@ sc_quest_config_load(const char *path, struct sc_quest_params *params) {
             params->ovfrac = f;
         } else if (!strcmp(key, "seamx") && is_float) {
             params->seam_x = f;
+        } else if (!strcmp(key, "bitrate") && is_float && f >= 1e6f
+                && f <= 1e9f) {
+            params->bit_rate = (uint32_t) f;
+        } else if (!strcmp(key, "codec")) {
+            if (!strcmp(value, "h264")) {
+                params->codec = SC_CODEC_H264;
+            } else if (!strcmp(value, "h265")) {
+                params->codec = SC_CODEC_H265;
+            } else if (!strcmp(value, "av1")) {
+                params->codec = SC_CODEC_AV1;
+            }
         } else if (!strcmp(key, "preset") && value[0] >= 'A'
                 && value[0] <= 'D' && !value[1]) {
             params->preset = SC_QUEST_PRESET_A + (value[0] - 'A');
@@ -377,10 +424,13 @@ sc_quest_config_save(const char *path, const struct sc_quest_params *params) {
                   "preset=%c\n"
                   "eye=%s\n"
                   "seam=%s\n"
-                  "seamx=%.3f\n",
+                  "seamx=%.3f\n"
+                  "bitrate=%" PRIu32 "\n"
+                  "codec=%s\n",
             cli, params->angle, params->k1, params->k2, params->ovfrac,
             'A' + params->preset, eye_names[params->eye],
-            seam_names[params->seam], params->seam_x);
+            seam_names[params->seam], params->seam_x, params->bit_rate,
+            codec_name(params->codec));
 
     return !fclose(file);
 }
@@ -397,6 +447,128 @@ sc_quest_save_config(struct sc_quest *q) {
         free(q->config_path);
         q->config_path = NULL;
     }
+}
+
+void
+sc_quest_resolve_options(struct scrcpy_options *opts) {
+    if (!opts->quest) {
+        return;
+    }
+
+    struct sc_quest_params params = opts->quest_params;
+    if (opts->quest_config) {
+        char *path = sc_quest_config_get_path();
+        if (path) {
+            sc_quest_config_load(path, &params);
+            free(path);
+        }
+    }
+
+    // The values set on the command line take precedence
+    if (!opts->video_bit_rate) {
+        opts->video_bit_rate = params.bit_rate;
+    }
+    if (!(opts->quest_set & SC_QUEST_SET_CODEC)) {
+        opts->video_codec = params.codec;
+    }
+
+    // The actual values (displayed, and saved once they are known to work)
+    opts->quest_params.bit_rate = opts->video_bit_rate;
+    opts->quest_params.codec = opts->video_codec;
+}
+
+bool
+sc_quest_request_restart(struct sc_quest *q, bool fullscreen, int x, int y,
+                         int w, int h) {
+    if (!q->restart_pending) {
+        return false;
+    }
+
+    if (sc_tick_now() - q->restart_date
+            < SC_TICK_FROM_MS(SC_QUEST_RESTART_DELAY_MS)) {
+        // Another key has been pressed since, another event will follow
+        return false;
+    }
+
+    q->restart_pending = false;
+    q->overlay_dirty = true;
+
+    if (q->restart_bit_rate == q->params.bit_rate
+            && q->restart_codec == q->params.codec) {
+        // Nothing to change
+        return false;
+    }
+
+#ifdef _WIN32
+    LOGW("Quest: restart is not supported on Windows, pass the options on "
+         "the command line instead");
+    return false;
+#else
+    // The new values are saved to the config file by the new instance, only
+    // once they are known to work (a first frame has been received)
+    struct sc_quest_params params = q->params;
+    params.bit_rate = q->restart_bit_rate;
+    params.codec = q->restart_codec;
+
+    char cli[320];
+    sc_quest_format_cli(&params, cli, sizeof(cli));
+
+    char window[128] = "";
+    if (fullscreen) {
+        snprintf(window, sizeof(window), " --fullscreen");
+    } else if (w > 0 && h > 0) {
+        snprintf(window, sizeof(window),
+                 " --window-x=%d --window-y=%d --window-width=%d "
+                 "--window-height=%d", x, y, w, h);
+    }
+
+    snprintf(sc_quest_restart.args, sizeof(sc_quest_restart.args), "%s%s",
+             cli, window);
+    sc_quest_restart.requested = true;
+    q->restarting = true;
+    return true;
+#endif
+}
+
+void
+sc_quest_restart_exec(int argc, char *argv[]) {
+    if (!sc_quest_restart.requested) {
+        return;
+    }
+
+#ifndef _WIN32
+    // Keep only the arguments passed by the user (not the ones added by a
+    // previous restart)
+    int count = argc;
+    const char *env = getenv("SCRCPY_QUEST_ARGC");
+    if (env) {
+        int value = atoi(env);
+        if (value > 0 && value <= argc) {
+            count = value;
+        }
+    }
+
+    // The arguments added at the end take precedence
+    char *new_argv[64];
+    int n = 0;
+    for (int i = 0; i < count && n < 30; ++i) {
+        new_argv[n++] = argv[i];
+    }
+    char *token = strtok(sc_quest_restart.args, " ");
+    while (token && n < 63) {
+        new_argv[n++] = token;
+        token = strtok(NULL, " ");
+    }
+    new_argv[n] = NULL;
+
+    char value[16];
+    snprintf(value, sizeof(value), "%d", count);
+    setenv("SCRCPY_QUEST_ARGC", value, 1);
+
+    fflush(stdout);
+    execvp(argv[0], new_argv);
+    LOGE("Could not restart scrcpy");
+#endif
 }
 
 // Print the current values as a ready-to-use command line
@@ -451,7 +623,10 @@ sc_quest_init(struct sc_quest *q, const struct sc_quest_params *params,
         }
     }
 
+    // (the bit rate and the codec are the actual ones, never loaded here)
     sc_quest_sanitize_params(&q->params);
+    q->restart_bit_rate = q->params.bit_rate;
+    q->restart_codec = q->params.codec;
     q->processing = true;
     q->overlay = true;
     q->overlay_dirty = true;
@@ -1212,6 +1387,12 @@ sc_quest_process(struct sc_quest *q, const AVFrame *frame) {
     };
     sc_quest_pool_run(&q->pool, remap_band, &job);
 
+    if (!q->first_frame_done) {
+        q->first_frame_done = true;
+        // The encoding parameters work: remember them
+        sc_quest_save_config(q);
+    }
+
     AVFrame *out = q->out;
     out->color_range = frame->color_range;
     out->colorspace = frame->colorspace;
@@ -1240,6 +1421,8 @@ sc_quest_is_key(SDL_Scancode scancode) {
         case SDL_SCANCODE_4:
         case SDL_SCANCODE_5:
         case SDL_SCANCODE_6:
+        case SDL_SCANCODE_Q:
+        case SDL_SCANCODE_H:
         case SDL_SCANCODE_7:
         case SDL_SCANCODE_8:
         case SDL_SCANCODE_9:
@@ -1298,6 +1481,40 @@ sc_quest_handle_key(struct sc_quest *q, SDL_Scancode scancode, bool shift) {
                 q->seam_valid = false;
             }
             break;
+        case SDL_SCANCODE_Q: {
+            // Next (or previous) bit rate
+            int count = ARRAY_LEN(bit_rates);
+            int index;
+            if (shift) {
+                index = 0;
+                for (int i = count - 1; i >= 0; --i) {
+                    if (bit_rates[i] < q->restart_bit_rate) {
+                        index = i;
+                        break;
+                    }
+                }
+            } else {
+                index = count - 1;
+                for (int i = 0; i < count; ++i) {
+                    if (bit_rates[i] > q->restart_bit_rate) {
+                        index = i;
+                        break;
+                    }
+                }
+            }
+            q->restart_bit_rate = bit_rates[index];
+            q->restart_pending = true;
+            q->restart_date = sc_tick_now();
+            q->overlay_dirty = true;
+            return true;
+        }
+        case SDL_SCANCODE_H:
+            q->restart_codec = q->restart_codec == SC_CODEC_H264
+                             ? SC_CODEC_H265 : SC_CODEC_H264;
+            q->restart_pending = true;
+            q->restart_date = sc_tick_now();
+            q->overlay_dirty = true;
+            return true;
         case SDL_SCANCODE_8:
         case SDL_SCANCODE_9: {
             // Move the fixed seam to the left or to the right
@@ -1319,7 +1536,12 @@ sc_quest_handle_key(struct sc_quest *q, SDL_Scancode scancode, bool shift) {
         case SDL_SCANCODE_0: {
             static const struct sc_quest_params defaults =
                 SC_QUEST_PARAMS_DEFAULT;
+            // (the bit rate and the codec are the actual ones, keep them)
+            uint32_t bit_rate = p->bit_rate;
+            enum sc_codec codec = p->codec;
             *p = defaults;
+            p->bit_rate = bit_rate;
+            p->codec = codec;
             q->seam_valid = false;
             break;
         }
@@ -1519,7 +1741,32 @@ sc_quest_render_overlay(struct sc_quest *q, int *w, int *h) {
     q->overlay_date = sc_tick_now();
 
     const struct sc_quest_params *p = &q->params;
-    char text[512];
+
+    // Actual video bit rate since the last overlay update
+    uint64_t bytes = atomic_load_explicit(&sc_quest_video_bytes,
+                                          memory_order_relaxed);
+    if (q->rate_date && q->overlay_date > q->rate_date + SC_TICK_FROM_MS(500)) {
+        q->rate_mbps = (bytes - q->rate_bytes) * 8.f
+                     / (q->overlay_date - q->rate_date);
+        q->rate_bytes = bytes;
+        q->rate_date = q->overlay_date;
+    } else if (!q->rate_date) {
+        q->rate_bytes = bytes;
+        q->rate_date = q->overlay_date;
+    }
+
+    char quality[96];
+    if (q->restarting || q->restart_pending) {
+        snprintf(quality, sizeof(quality), "QUALITY %uM %s - RESTARTING...",
+                 (unsigned) (q->restart_bit_rate / 1000000),
+                 codec_name(q->restart_codec));
+    } else {
+        snprintf(quality, sizeof(quality), "QUALITY %uM %s (ACTUAL %.1fM)",
+                 (unsigned) (p->bit_rate / 1000000), codec_name(p->codec),
+                 q->rate_mbps);
+    }
+
+    char text[640];
     if (q->processing) {
         char mode[64];
         if (p->eye == SC_QUEST_EYE_BOTH) {
@@ -1533,16 +1780,17 @@ sc_quest_render_overlay(struct sc_quest *q, int *w, int *h) {
         }
         snprintf(text, sizeof(text),
                  "QUEST VIEW %c  %s  %dX%d  %.1f MS\n"
-                 "ANGLE %.1f  K1 %.2f  K2 %.2f  OVERLAP %.3f\n"
-                 "1-4 VIEW  5 EYE  6 SEAM MODE  7 NEW SEAM  8 9 MOVE SEAM\n"
+                 "ANGLE %.1f  K1 %.2f  K2 %.2f  OVERLAP %.3f  %s\n"
+                 "1-4 VIEW  5 EYE  6 SEAM MODE  7 NEW SEAM  8 9 MOVE SEAM"
+                 "  Q QUALITY  H CODEC\n"
                  "[ ] ANGLE  - = K1  ; ' K2  , . OVERLAP  \\ RAW"
                  "  0 DEFAULTS  / HIDE",
                  'A' + p->preset, mode, q->crop.w, q->crop.h, q->avg_ms,
-                 p->angle, p->k1, p->k2, p->ovfrac);
+                 p->angle, p->k1, p->k2, p->ovfrac, quality);
     } else {
         snprintf(text, sizeof(text),
-                 "QUEST RAW BUFFER (PROCESSING OFF)\n"
-                 "\\ PROCESS  / HIDE");
+                 "QUEST RAW BUFFER (PROCESSING OFF)  %s\n"
+                 "\\ PROCESS  Q QUALITY  H CODEC  / HIDE", quality);
     }
 
     return render_text(text, w, h);

@@ -109,7 +109,7 @@ struct sc_screen_params {
 
     bool quest;
     struct sc_quest_params quest_params;
-    uint8_t quest_set;
+    uint16_t quest_set;
     bool quest_config;
 };
 
@@ -162,6 +162,11 @@ sc_screen_set_paused(struct sc_screen *screen, bool paused);
 void
 sc_screen_quest_handle_key(struct sc_screen *screen, SDL_Scancode scancode,
                            bool shift);
+
+// Called when a restart may be necessary to apply a new video quality. Return
+// true if scrcpy must exit to be restarted.
+bool
+sc_screen_quest_restart(struct sc_screen *screen);
 
 // react to SDL events
 // If this function returns false, scrcpy must exit with an error.

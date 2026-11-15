@@ -261,6 +261,7 @@ enum sc_quest_seam {
 #define SC_QUEST_SET_EYE 0x20
 #define SC_QUEST_SET_SEAM 0x40
 #define SC_QUEST_SET_SEAM_X 0x80
+#define SC_QUEST_SET_CODEC 0x100
 
 #define SC_QUEST_PARAMS_DEFAULT { \
     .angle = 20.9f, \
@@ -271,6 +272,8 @@ enum sc_quest_seam {
     .eye = SC_QUEST_EYE_BOTH, \
     .seam = SC_QUEST_SEAM_AUTO, \
     .seam_x = 0.f, \
+    .bit_rate = 80000000, \
+    .codec = SC_CODEC_H264, \
 }
 
 // Parameters of the Meta Quest viewing mode (--quest)
@@ -285,6 +288,10 @@ struct sc_quest_params {
     // Position of the fixed seam, relative to the center of the overlap, as a
     // fraction of the eye width (negative to move it to the left)
     float seam_x;
+    // Video encoding parameters (the default bit rate of scrcpy is far too
+    // low for the Quest display size)
+    uint32_t bit_rate;
+    enum sc_codec codec;
 };
 
 struct scrcpy_options {
@@ -389,7 +396,7 @@ struct scrcpy_options {
     bool vd_system_decorations;
     bool quest;
     struct sc_quest_params quest_params;
-    uint8_t quest_set; // OR of SC_QUEST_SET_* (set on the command line)
+    uint16_t quest_set; // OR of SC_QUEST_SET_* (set on the command line)
     bool quest_config; // load/save the parameters from/to the config file
 };
 

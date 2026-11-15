@@ -3,6 +3,7 @@
 
 #include "common.h"
 
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -37,6 +38,12 @@
 // decoded frame.
 
 #define SC_QUEST_MAX_WORKERS 7
+
+// Delay between the last quality key press and the restart
+#define SC_QUEST_RESTART_DELAY_MS 1200
+
+// Number of bytes of video packets received (to report the actual bit rate)
+extern atomic_uint_least64_t sc_quest_video_bytes;
 
 struct sc_quest_pool {
     sc_mutex mutex;
@@ -104,6 +111,20 @@ struct sc_quest {
 
     struct sc_quest_pool pool;
 
+    // Video quality to apply by restarting (if restart_pending)
+    bool restart_pending;
+    uint32_t restart_bit_rate;
+    enum sc_codec restart_codec;
+    sc_tick restart_date; // date of the last quality key press
+    bool restarting;
+
+    bool first_frame_done;
+
+    // actual video bit rate
+    uint64_t rate_bytes;
+    sc_tick rate_date;
+    float rate_mbps;
+
     // stats
     float last_ms; // duration of the processing of the last frame
     float avg_ms;
@@ -115,6 +136,30 @@ struct sc_quest {
 bool
 sc_quest_init(struct sc_quest *q, const struct sc_quest_params *params,
               uint8_t cli_set, bool use_config);
+
+// In Meta Quest viewing mode, set the video bit rate and codec from the config
+// file or from the Quest defaults if they are not set on the command line
+void
+sc_quest_resolve_options(struct scrcpy_options *opts);
+
+static inline bool
+sc_quest_is_restart_pending(const struct sc_quest *q) {
+    return q->restart_pending;
+}
+
+// To be called SC_QUEST_RESTART_DELAY_MS after a quality key press. If a
+// restart is necessary to apply a new video quality, store the command line
+// arguments to pass to the new process (including the current window
+// geometry) and return true: scrcpy must exit and call
+// sc_quest_restart_exec().
+bool
+sc_quest_request_restart(struct sc_quest *q, bool fullscreen, int x, int y,
+                         int w, int h);
+
+// Replace the current process by a new scrcpy instance (if a restart has been
+// requested). Return only if no restart is requested or on error.
+void
+sc_quest_restart_exec(int argc, char *argv[]);
 
 // Save the current parameters to the config file (if enabled)
 void

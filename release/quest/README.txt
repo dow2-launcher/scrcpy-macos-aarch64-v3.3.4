@@ -22,6 +22,9 @@ Keys in the window (US layout positions, hold Shift for bigger steps):
     - =       lens correction k1 -/+ 0.01
     ; '       lens correction k2 -/+ 0.01
     , .       eyes overlap -/+ 0.002
+    Q         video quality: next bit rate 16/40/80/120/200 Mbps (Shift+Q:
+              previous); default 80 Mbps; the mirroring restarts to apply it
+    H         video codec H.264 / H.265 (restarts too)
     \         toggle processing (raw buffer)
     /         toggle the text overlay
     0         reset to the default values
@@ -56,6 +59,9 @@ next run. The equivalent command line is printed on every change, e.g.:
     - =       распрямление k1 -/+ 0.01
     ; '       распрямление k2 -/+ 0.01
     , .       перекрытие глаз -/+ 0.002
+    Q         качество: следующий битрейт 16/40/80/120/200 Мбит/с (Shift+Q —
+              предыдущий); по умолчанию 80; трансляция перезапускается
+    H         кодек H.264 / H.265 (тоже с перезапуском)
     \         вкл/выкл обработку (сырой буфер)
     /         показать/скрыть строку значений
     0         сброс к значениям по умолчанию

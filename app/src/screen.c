@@ -440,6 +440,9 @@ sc_screen_init(struct sc_screen *screen,
             goto error_destroy_display;
         }
         screen->quest_enabled = true;
+        if (SDL_InitSubSystem(SDL_INIT_TIMER)) {
+            LOGW("Could not initialize SDL timer: %s", SDL_GetError());
+        }
     }
 
     struct sc_input_manager_params im_params = {
@@ -861,6 +864,43 @@ sc_screen_resize_to_pixel_perfect(struct sc_screen *screen) {
                                             content_size.height);
 }
 
+static uint32_t
+quest_restart_timer(uint32_t interval, void *userdata) {
+    (void) interval;
+    (void) userdata;
+    sc_push_event(SC_EVENT_QUEST_RESTART);
+    return 0; // one shot
+}
+
+bool
+sc_screen_quest_restart(struct sc_screen *screen) {
+    if (!screen->quest_enabled) {
+        return false;
+    }
+
+    int x = 0;
+    int y = 0;
+    int w = 0;
+    int h = 0;
+    bool windowed = !screen->fullscreen && !screen->maximized
+                 && !screen->minimized;
+    if (windowed) {
+        SDL_GetWindowPosition(screen->window, &x, &y);
+        SDL_GetWindowSize(screen->window, &w, &h);
+    }
+
+    bool restart = sc_quest_request_restart(&screen->quest,
+                                            screen->fullscreen, x, y, w, h);
+
+    // Show (or remove) the restart message
+    sc_screen_update_quest_overlay(screen);
+    if (screen->has_frame) {
+        sc_screen_render(screen, false);
+    }
+
+    return restart;
+}
+
 void
 sc_screen_quest_handle_key(struct sc_screen *screen, SDL_Scancode scancode,
                            bool shift) {
@@ -869,7 +909,18 @@ sc_screen_quest_handle_key(struct sc_screen *screen, SDL_Scancode scancode,
     }
 
     bool changed = sc_quest_handle_key(&screen->quest, scancode, shift);
-    if (!changed || screen->quest_refresh_pending) {
+    if (!changed) {
+        return;
+    }
+
+    if (sc_quest_is_restart_pending(&screen->quest)) {
+        // Wait a bit before restarting, in case the user is still pressing
+        // the quality keys
+        SDL_AddTimer(SC_QUEST_RESTART_DELAY_MS + 100, quest_restart_timer,
+                     NULL);
+    }
+
+    if (screen->quest_refresh_pending) {
         return;
     }
 

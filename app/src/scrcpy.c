@@ -201,6 +201,12 @@ event_loop(struct scrcpy *s, bool has_screen) {
             case SDL_QUIT:
                 LOGD("User requested to quit");
                 return SCRCPY_EXIT_SUCCESS;
+            case SC_EVENT_QUEST_RESTART:
+                if (has_screen && sc_screen_quest_restart(&s->screen)) {
+                    LOGI("Restarting to apply the new video quality");
+                    return SCRCPY_EXIT_SUCCESS;
+                }
+                break;
             case SC_EVENT_RUN_ON_MAIN_THREAD: {
                 sc_runnable_fn run = event.user.data1;
                 void *userdata = event.user.data2;

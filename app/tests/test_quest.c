@@ -19,6 +19,8 @@ static const struct sc_quest_params default_params = {
     .k2 = -0.05f,
     .ovfrac = 0.844f,
     .preset = SC_QUEST_PRESET_B,
+    .bit_rate = 80000000,
+    .codec = SC_CODEC_H264,
 };
 
 static AVFrame *
@@ -269,6 +271,22 @@ static void test_presets_and_keys(void) {
     assert(q.params.angle == default_params.angle);
     assert(q.params.preset == SC_QUEST_PRESET_B);
 
+    // Quality keys request a restart, they do not change the actual values
+    assert(q.params.bit_rate == 80000000);
+    assert(sc_quest_handle_key(&q, SDL_SCANCODE_Q, false));
+    assert(sc_quest_is_restart_pending(&q));
+    assert(q.restart_bit_rate == 120000000);
+    assert(sc_quest_handle_key(&q, SDL_SCANCODE_Q, true));
+    assert(sc_quest_handle_key(&q, SDL_SCANCODE_Q, true));
+    assert(q.restart_bit_rate == 40000000);
+    assert(sc_quest_handle_key(&q, SDL_SCANCODE_H, false));
+    assert(q.restart_codec == SC_CODEC_H265);
+    assert(q.params.bit_rate == 80000000);
+    assert(q.params.codec == SC_CODEC_H264);
+    // too early (the user may still be pressing keys)
+    assert(!sc_quest_request_restart(&q, false, 0, 0, 100, 100));
+    assert(sc_quest_is_restart_pending(&q));
+
     assert(!sc_quest_is_key(SDL_SCANCODE_A));
     assert(!sc_quest_handle_key(&q, SDL_SCANCODE_A, false));
 
@@ -374,6 +392,8 @@ static void test_config(void) {
         .eye = SC_QUEST_EYE_RIGHT,
         .seam = SC_QUEST_SEAM_FIXED,
         .seam_x = -0.042f,
+        .bit_rate = 120000000,
+        .codec = SC_CODEC_H265,
     };
     bool ok = sc_quest_config_save(path, &params);
     assert(ok);
@@ -397,7 +417,10 @@ static void test_config(void) {
     assert(!strcmp(cli, "--quest --quest-angle=21.3 --quest-k1=-0.31 "
                         "--quest-k2=0.02 --quest-ovfrac=0.852 "
                         "--quest-preset=C --quest-eye=right "
-                        "--quest-seam=fixed --quest-seam-x=-0.042"));
+                        "--quest-seam=fixed --quest-seam-x=-0.042 "
+                        "--video-bit-rate=120000000 --video-codec=h265"));
+    assert(loaded.bit_rate == 120000000);
+    assert(loaded.codec == SC_CODEC_H265);
 
     remove(path);
     assert(!sc_quest_config_load(path, &loaded));

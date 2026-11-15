@@ -825,6 +825,12 @@ static const struct sc_option options[] = {
                 "and restored on the next run (the command line options take "
                 "precedence). On every change, the equivalent command line is "
                 "printed to the console.\n"
+                "In this mode, the default video bit rate is 80M (instead of "
+                "8M). The video quality can be changed from the window: Q "
+                "and Shift+Q select the next/previous bit rate (16M, 40M, "
+                "80M, 120M, 200M), H toggles the codec (h264/h265). The "
+                "mirroring is restarted to apply the new encoding parameters "
+                "(they are remembered too).\n"
                 "Mouse and touch events are not forwarded in this mode.",
     },
     {
@@ -2943,6 +2949,7 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                 if (!parse_video_codec(optarg, &opts->video_codec)) {
                     return false;
                 }
+                opts->quest_set |= SC_QUEST_SET_CODEC;
                 break;
             case OPT_AUDIO_CODEC:
                 if (!parse_audio_codec(optarg, &opts->audio_codec)) {

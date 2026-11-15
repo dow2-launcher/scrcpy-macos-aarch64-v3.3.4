@@ -55,6 +55,8 @@ bigger steps.
 | <kbd>-</kbd> <kbd>=</kbd>    | Lens correction `k1` ∓0.01 (curved straight lines)      |
 | <kbd>;</kbd> <kbd>'</kbd>    | Lens correction `k2` ∓0.01                              |
 | <kbd>,</kbd> <kbd>.</kbd>    | Eyes overlap `ovfrac` ∓0.002 (doubled or torn seam)     |
+| <kbd>Q</kbd> / <kbd>Shift</kbd>+<kbd>Q</kbd> | Video quality: next / previous bit rate (16, 40, 80, 120, 200 Mbps) |
+| <kbd>H</kbd>                 | Video codec: H.264 ↔ H.265                              |
 | <kbd>\</kbd>                | Toggle processing (show the raw buffer)                 |
 | <kbd>/</kbd>                 | Toggle the text overlay (current values)                |
 | <kbd>0</kbd>                 | Reset everything to the default values                  |
@@ -74,6 +76,22 @@ Seam modes (the cut between the two eyes; `--quest-seam=…`):
 The overlay shows the eye mode, the seam mode and the seam position (`X`, in
 pixels of the merged picture).
 
+**Video quality.** Blocky artifacts come from the encoder bit rate: the scrcpy
+default (8 Mbps) is far too low for the Quest display size, so in `--quest`
+mode the default is **80 Mbps** (unless `-b`/`--video-bit-rate` is given). The
+encoder parameters cannot be changed on a running stream, so
+<kbd>Q</kbd>/<kbd>H</kbd> restart the mirroring with the new values about one
+second after the last key press: the window closes and reopens at the same
+place within a couple of seconds, and all the other settings are kept. The
+overlay shows the requested bit rate, the codec and the bit rate actually
+received (`ACTUAL`; the encoder produces less on static pictures). The new
+quality is remembered only once a picture has been received with it: if the
+headset encoder rejects a setting (for example H.265), scrcpy exits and the
+next run uses the previous working values.
+
+If the picture looks rough when the window is much smaller than the video,
+try `--render-driver=opengl` (enables trilinear filtering).
+
 **The last values are remembered**: they are saved to
 `~/.config/scrcpy-quest.conf` on every change and restored on the next run
 (command line options take precedence; `--quest-no-config` disables this).
@@ -89,11 +107,11 @@ The values can also be passed on the command line:
 ```bash
 ./scrcpy --quest --quest-angle=21.0 --quest-k1=-0.26 --quest-k2=-0.05 \
          --quest-ovfrac=0.844 --quest-preset=B --quest-eye=both \
-         --quest-seam=fixed --quest-seam-x=0
+         --quest-seam=fixed --quest-seam-x=0 -b 120M --video-codec=h265
 ```
 
 Defaults: angle 20.9°, k1 −0.26, k2 −0.05, ovfrac 0.844, preset B, both eyes,
-seam `auto`.
+seam `auto`, 80 Mbps H.264.
 
 ## Build
 
@@ -160,6 +178,8 @@ Quest 3 (два «рыбьих глаза» рядом, с наклоном па
 | <kbd>-</kbd> <kbd>=</kbd>    | Распрямление `k1` ∓0.01 (прямые линии изогнуты)         |
 | <kbd>;</kbd> <kbd>'</kbd>    | Распрямление `k2` ∓0.01                                 |
 | <kbd>,</kbd> <kbd>.</kbd>    | Перекрытие глаз `ovfrac` ∓0.002 (шов двоит или расходится) |
+| <kbd>Q</kbd> / <kbd>Shift</kbd>+<kbd>Q</kbd> | Качество видео: следующий / предыдущий битрейт (16, 40, 80, 120, 200 Мбит/с) |
+| <kbd>H</kbd>                 | Кодек: H.264 ↔ H.265                                    |
 | <kbd>\</kbd>                | Вкл/выкл обработку (показать сырой буфер)               |
 | <kbd>/</kbd>                 | Показать/скрыть строку с текущими значениями            |
 | <kbd>0</kbd>                 | Сбросить всё к значениям по умолчанию                   |
@@ -179,6 +199,22 @@ Quest 3 (два «рыбьих глаза» рядом, с наклоном па
 В строке значений видно режим глаз, режим шва и положение шва (`X`, в
 пикселях склеенного кадра).
 
+**Качество видео.** Картинка рассыпается квадратами из-за битрейта кодировщика:
+стандартные для scrcpy 8 Мбит/с слишком малы для экрана Quest, поэтому в
+режиме `--quest` по умолчанию **80 Мбит/с** (если не задан
+`-b`/`--video-bit-rate`). Параметры кодировщика нельзя менять на идущем
+потоке, поэтому <kbd>Q</kbd>/<kbd>H</kbd> перезапускают трансляцию с новыми
+значениями примерно через секунду после последнего нажатия: окно закрывается и
+за пару секунд открывается на том же месте, остальные настройки сохраняются. В
+строке значений видны запрошенный битрейт, кодек и реально приходящий битрейт
+(`ACTUAL`; на неподвижной картинке кодировщик выдаёт меньше). Новое качество
+запоминается, только когда с ним пришла картинка: если кодировщик шлема не
+принял настройку (например, H.265), scrcpy завершится, а следующий запуск
+возьмёт прежние рабочие значения.
+
+Если картинка грубая, когда окно намного меньше видео, попробуйте
+`--render-driver=opengl` (включает трилинейную фильтрацию).
+
 **Последние значения запоминаются**: при каждом изменении они сохраняются в
 `~/.config/scrcpy-quest.conf` и подхватываются при следующем запуске (опции
 командной строки главнее; `--quest-no-config` отключает это). При каждом
@@ -195,11 +231,11 @@ Quest 3 (два «рыбьих глаза» рядом, с наклоном па
 ```bash
 ./scrcpy --quest --quest-angle=21.0 --quest-k1=-0.26 --quest-k2=-0.05 \
          --quest-ovfrac=0.844 --quest-preset=B --quest-eye=both \
-         --quest-seam=fixed --quest-seam-x=0
+         --quest-seam=fixed --quest-seam-x=0 -b 120M --video-codec=h265
 ```
 
 По умолчанию: угол 20.9°, k1 −0.26, k2 −0.05, ovfrac 0.844, пресет B, оба
-глаза, шов `auto`.
+глаза, шов `auto`, 80 Мбит/с H.264.
 
 ---
 
