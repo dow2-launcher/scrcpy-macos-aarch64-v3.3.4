@@ -1,0 +1,60 @@
+name: Quest web mode (server)
+
+# Experimental: scrcpy-server serving a web page with the headset picture (see release/quest/README-web.txt).
+# Only builds an artifact, nothing is released.
+on:
+  push:
+    branches:
+      - quest-web
+  workflow_dispatch:
+
+jobs:
+  build-server:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Unit tests and build
+        run: ./gradlew -p server testReleaseUnitTest assembleRelease
+
+      - name: Browser test (headless Chrome against the real web server code)
+        run: |
+            set -ex
+            mkdir -p /tmp/webfeed /tmp/webtest
+            javac -d /tmp/webfeed server/src/main/java/com/genymobile/scrcpy/web/*.java release/quest/e2e/WebFeed.java
+            java -cp /tmp/webfeed WebFeed 8090 release/quest/e2e/test.h264 2064 1104 30 device \
+                server/src/main/resources/questweb/index.html &
+            (cd /tmp/webtest && npm init -y >/dev/null && npm install puppeteer-core >/dev/null)
+            sleep 2
+            curl -fsS http://localhost:8090/status
+            export NODE_PATH=/tmp/webtest/node_modules
+            export CHROME="$(which google-chrome)"
+            node release/quest/e2e/web_test.js http://localhost:8090/
+
+      - name: Package
+        id: package
+        run: |
+            set -ex
+            name="questview-web-${GITHUB_SHA::7}"
+            mkdir -p "release/output/$name"
+            cp server/build/outputs/apk/release/server-release-unsigned.apk "release/output/$name/scrcpy-server-questweb"
+            unzip -l "release/output/$name/scrcpy-server-questweb" | grep questweb/index.html
+            cp release/quest/questweb.sh release/quest/README-web.txt "release/output/$name/"
+            chmod +x "release/output/$name/questweb.sh"
+            cd release/output
+            zip -r "$name.zip" "$name"
+            sha256sum "$name.zip"
+            echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: release/output/${{ steps.package.outputs.name }}.zip

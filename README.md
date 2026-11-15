@@ -167,6 +167,16 @@ only**, seam `auto`, 30 Mbps H.264, **60 fps at most**, **no audio**
 decoding off). The config file is `scrcpy-quest2.conf` since these defaults, so
 the values saved by older builds do not override them.
 
+## Web mode (experimental, branch `quest-web`)
+
+The headset itself can serve a web page with its picture, to watch it in the
+browser of a TV (or a phone, or a computer) on the same Wi-Fi, without a
+computer running scrcpy: a modified `scrcpy-server` is started once over adb,
+keeps running after the cable is unplugged, and serves
+`http://<headset IP>:8090/`. See
+[release/quest/README-web.txt](release/quest/README-web.txt) (English and
+Russian) and `release/quest/questweb.sh`.
+
 ## Build
 
 The macOS binaries are built by [GitHub Actions](.github/workflows/macos.yml)
