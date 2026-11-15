@@ -65,6 +65,15 @@ public abstract class SurfaceCapture {
     }
 
     /**
+     * Called when the capture is suspended for an undetermined duration (in web mode, when no client is connected), after {@link #stop()}.
+     * <p>
+     * The capture may be restarted later by {@link #prepare()} and {@link #start(Surface)}.
+     */
+    public void suspend() {
+        // Do nothing by default
+    }
+
+    /**
      * Return the video size
      *
      * @return the video size

@@ -22,7 +22,7 @@ BUILD_TOOLS_DIR="$ANDROID_HOME/build-tools/$BUILD_TOOLS"
 BUILD_DIR="$(realpath ${BUILD_DIR:-build_manual})"
 CLASSES_DIR="$BUILD_DIR/classes"
 GEN_DIR="$BUILD_DIR/gen"
-SERVER_DIR=$(dirname "$0")
+SERVER_DIR=$(realpath "$(dirname "$0")")
 SERVER_BINARY=scrcpy-server
 ANDROID_JAR="$PLATFORM_TOOLS/android.jar"
 ANDROID_AIDL="$PLATFORM_TOOLS/framework.aidl"
@@ -65,6 +65,7 @@ SRC=( \
     com/genymobile/scrcpy/opengl/*.java \
     com/genymobile/scrcpy/util/*.java \
     com/genymobile/scrcpy/video/*.java \
+    com/genymobile/scrcpy/web/*.java \
     com/genymobile/scrcpy/wrappers/*.java \
 )
 
@@ -109,6 +110,9 @@ else
     cd "$BUILD_DIR"
     mv classes.zip "$SERVER_BINARY"
 fi
+
+# Add the web page (served in web mode)
+jar ufM "$BUILD_DIR/$SERVER_BINARY" -C "$SERVER_DIR/src/main/resources" questweb
 
 rm -rf "$GEN_DIR" "$CLASSES_DIR"
 

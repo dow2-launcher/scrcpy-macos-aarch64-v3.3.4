@@ -12,6 +12,7 @@ import com.genymobile.scrcpy.video.CameraAspectRatio;
 import com.genymobile.scrcpy.video.CameraFacing;
 import com.genymobile.scrcpy.video.VideoCodec;
 import com.genymobile.scrcpy.video.VideoSource;
+import com.genymobile.scrcpy.web.QuestParams;
 import com.genymobile.scrcpy.wrappers.WindowManager;
 
 import android.graphics.Rect;
@@ -79,6 +80,18 @@ public class Options {
     private boolean sendFrameMeta = true; // send PTS so that the client may record properly
     private boolean sendDummyByte = true; // write a byte on start to detect connection issues
     private boolean sendCodecMeta = true; // write the codec metadata before the stream
+
+    // Web mode: instead of connecting to the scrcpy client, serve a web page and the video stream over HTTP/WebSocket on this TCP port
+    private int webPort;
+    private QuestParams questParams; // Meta Quest picture processing (web mode only)
+
+    public int getWebPort() {
+        return webPort;
+    }
+
+    public QuestParams getQuestParams() {
+        return questParams;
+    }
 
     public Ln.Level getLogLevel() {
         return logLevel;
@@ -512,10 +525,32 @@ public class Options {
                         options.sendCodecMeta = false;
                     }
                     break;
+                case "web_port":
+                    options.webPort = Integer.parseInt(value);
+                    if (options.webPort < 1024 || options.webPort > 65535) {
+                        throw new IllegalArgumentException("Invalid web port: " + value);
+                    }
+                    break;
                 default:
+                    if (key.startsWith("quest_")) {
+                        // quest_process, quest_eye, quest_preset, quest_angle, quest_k1, quest_k2, quest_ovfrac, quest_seam_x, quest_box
+                        if (options.questParams == null) {
+                            options.questParams = new QuestParams();
+                        }
+                        String questKey = key.substring("quest_".length());
+                        if (!QuestParams.isValid(questKey, value)) {
+                            throw new IllegalArgumentException("Invalid Quest parameter: " + arg);
+                        }
+                        options.questParams.set(questKey, value);
+                        break;
+                    }
                     Ln.w("Unknown server option: " + key);
                     break;
             }
+        }
+
+        if (options.webPort != 0 && options.questParams == null) {
+            options.questParams = new QuestParams();
         }
 
         if (options.newDisplay != null) {

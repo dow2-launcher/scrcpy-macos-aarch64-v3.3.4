@@ -22,14 +22,18 @@ import com.genymobile.scrcpy.video.NewDisplayCapture;
 import com.genymobile.scrcpy.video.ScreenCapture;
 import com.genymobile.scrcpy.video.SurfaceCapture;
 import com.genymobile.scrcpy.video.SurfaceEncoder;
+import com.genymobile.scrcpy.video.VideoCodec;
 import com.genymobile.scrcpy.video.VideoSource;
+import com.genymobile.scrcpy.web.WebServer;
 
 import android.annotation.SuppressLint;
 import android.os.Build;
 import android.os.Looper;
 
 import java.io.File;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
@@ -82,6 +86,11 @@ public final class Server {
                 Ln.e("Display IME policy is not supported before Android 10");
                 throw new ConfigurationException("Display IME policy is not supported");
             }
+        }
+
+        if (options.getWebPort() != 0) {
+            scrcpyWeb(options);
+            return;
         }
 
         CleanUp cleanUp = null;
@@ -191,6 +200,65 @@ public final class Server {
             }
 
             connection.close();
+        }
+    }
+
+    private static byte[] loadWebPage() throws IOException {
+        // The page is stored in the server file (a zip) next to classes.dex
+        try (java.util.zip.ZipFile zip = new java.util.zip.ZipFile(SERVER_PATH)) {
+            java.util.zip.ZipEntry entry = zip.getEntry("questweb/index.html");
+            if (entry == null) {
+                throw new IOException("questweb/index.html not found in " + SERVER_PATH);
+            }
+            try (InputStream in = zip.getInputStream(entry)) {
+                ByteArrayOutputStream out = new ByteArrayOutputStream();
+                byte[] buffer = new byte[16384];
+                int r;
+                while ((r = in.read(buffer)) != -1) {
+                    out.write(buffer, 0, r);
+                }
+                return out.toByteArray();
+            }
+        }
+    }
+
+    /**
+     * Web mode: no scrcpy client, the video is served to web browsers on the local network (see {@link WebServer}).
+     * <p>
+     * The process is intended to be started detached from adb, and to run until the device is rebooted. The display is captured only while a
+     * browser is connected.
+     */
+    private static void scrcpyWeb(Options options) throws IOException, ConfigurationException {
+        if (options.getVideoCodec() != VideoCodec.H264) {
+            Ln.e("Web mode only supports H.264");
+            throw new ConfigurationException("Web mode only supports H.264");
+        }
+        if (options.getVideoSource() != VideoSource.DISPLAY || options.getNewDisplay() != null) {
+            Ln.e("Web mode only supports display mirroring");
+            throw new ConfigurationException("Web mode only supports display mirroring");
+        }
+
+        Workarounds.apply();
+
+        WebServer webServer = new WebServer(options.getWebPort(), loadWebPage(), options.getQuestParams(), Ln::i);
+        webServer.start();
+
+        Streamer videoStreamer = new Streamer(webServer, options.getVideoCodec());
+        SurfaceCapture surfaceCapture = new ScreenCapture(null, options);
+        SurfaceEncoder surfaceEncoder = new SurfaceEncoder(surfaceCapture, videoStreamer, options);
+        try {
+            surfaceEncoder.start((fatalError) -> Looper.getMainLooper().quitSafely());
+            Looper.loop(); // interrupted on fatal error
+        } finally {
+            surfaceEncoder.stop();
+            webServer.stop();
+            OpenGLRunner.quit();
+            try {
+                surfaceEncoder.join();
+                OpenGLRunner.join();
+            } catch (InterruptedException e) {
+                // ignore
+            }
         }
     }
 

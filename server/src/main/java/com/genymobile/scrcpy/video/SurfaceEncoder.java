@@ -12,6 +12,7 @@ import com.genymobile.scrcpy.util.CodecUtils;
 import com.genymobile.scrcpy.util.IO;
 import com.genymobile.scrcpy.util.Ln;
 import com.genymobile.scrcpy.util.LogUtils;
+import com.genymobile.scrcpy.web.WebServer;
 
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
@@ -67,6 +68,27 @@ public class SurfaceEncoder implements AsyncProcessor {
         MediaCodec mediaCodec = createMediaCodec(codec, encoderName);
         MediaFormat format = createFormat(codec.getMimeType(), videoBitRate, maxFps, codecOptions);
 
+        // In web mode, capture and encode only while at least one browser is connected
+        WebServer webServer = streamer.getWebServer();
+        if (webServer != null) {
+            webServer.setListener(new WebServer.Listener() {
+                @Override
+                public void onIdle() {
+                    reset.reset();
+                }
+
+                @Override
+                public void onKeyFrameRequested() {
+                    reset.requestKeyFrame();
+                }
+
+                @Override
+                public void onRestartRequested() {
+                    reset.reset();
+                }
+            });
+        }
+
         capture.init(reset);
 
         try {
@@ -74,6 +96,19 @@ public class SurfaceEncoder implements AsyncProcessor {
             boolean headerWritten = false;
 
             do {
+                if (webServer != null) {
+                    if (webServer.getClientCount() == 0) {
+                        Ln.i("No web client: capture suspended");
+                        capture.suspend();
+                        if (!webServer.awaitClient() || stopped.get()) {
+                            break;
+                        }
+                        Ln.i("Web client connected: capture started");
+                    }
+                    // The video size may change between two sessions (Quest parameters changed from the web page)
+                    headerWritten = false;
+                }
+
                 reset.consumeReset(); // If a capture reset was requested, it is implicitly fulfilled
                 capture.prepare();
                 Size size = capture.getSize();

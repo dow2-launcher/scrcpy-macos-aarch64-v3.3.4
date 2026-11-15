@@ -1,0 +1,840 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QuestView</title>
+<style>
+html, body { margin: 0; height: 100%; background: #000; overflow: hidden; color: #e6e6e6;
+             font: 18px/1.35 -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+#stage { position: absolute; left: 0; top: 0; width: 100%; height: 100%; }
+#vid, #cv { position: absolute; left: 0; top: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+/* The video must stay in the page (and "visible") to be decoded, even when the canvas is displayed */
+#vid.feed { width: 4px; height: 4px; opacity: 0.01; }
+.off { display: none; }
+#msg { position: absolute; left: 0; right: 0; top: 44%; text-align: center; font-size: 26px; padding: 0 5%;
+       text-shadow: 0 0 6px #000; pointer-events: none; }
+#hint { position: absolute; right: 16px; bottom: 12px; font-size: 16px; color: #bbb; background: rgba(0, 0, 0, .55);
+        padding: 4px 10px; border-radius: 6px; pointer-events: none; }
+#stats { position: absolute; left: 10px; top: 8px; font: 15px/1.3 Menlo, Consolas, monospace; background: rgba(0, 0, 0, .6);
+         padding: 4px 9px; border-radius: 6px; white-space: pre; pointer-events: none; }
+#menu { position: absolute; left: 4%; top: 6%; min-width: 420px; background: rgba(18, 18, 22, .9); border-radius: 12px;
+        padding: 12px 6px; box-shadow: 0 4px 30px rgba(0, 0, 0, .6); }
+#menu h1 { font-size: 20px; margin: 0 14px 8px; font-weight: 600; }
+#menu .row { display: flex; align-items: center; padding: 5px 14px; border-radius: 8px; }
+#menu .row.sel { background: #2f5fd0; }
+#menu .name { flex: 1; }
+#menu .val { min-width: 130px; text-align: center; }
+#menu button { font: inherit; color: inherit; background: rgba(255, 255, 255, .14); border: 0; border-radius: 6px;
+               width: 40px; height: 34px; cursor: pointer; }
+#menu .note { font-size: 14px; color: #aaa; margin: 8px 14px 0; max-width: 420px; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="vid" class="feed" muted autoplay playsinline></video>
+  <canvas id="cv" class="off"></canvas>
+</div>
+<div id="msg">Подключение к очкам…</div>
+<div id="stats" class="off"></div>
+<div id="hint">OK / Enter / щелчок — настройки</div>
+<div id="menu" class="off"></div>
+<script>
+(function () {
+'use strict';
+
+function $(id) { return document.getElementById(id); }
+var video = $('vid'), canvas = $('cv'), msgEl = $('msg'), statsEl = $('stats'), menuEl = $('menu'), hintEl = $('hint');
+
+var qs = {};
+location.search.replace(/[?&]([^=&]+)=([^&]*)/g, function (m, k, v) { qs[k] = decodeURIComponent(v); return m; });
+
+function loadLocal(key, def) {
+    if (qs[key] !== undefined) { return qs[key]; }
+    try { var v = window.localStorage.getItem('questview.' + key); return v === null ? def : v; } catch (e) { return def; }
+}
+function saveLocal(key, value) {
+    try { window.localStorage.setItem('questview.' + key, value); } catch (e) { /* ignore */ }
+}
+
+var local = {
+    stats: loadLocal('stats', '0') === '1',
+    player: loadLocal('player', 'auto'), // auto, mse, webcodecs
+    lat: parseFloat(loadLocal('lat', '0.12')) || 0.12 // target buffer of the MSE player, in seconds
+};
+
+var hello = null;   // last "hello" message
+var quest = null;   // Quest parameters (owned by the server)
+var config = null;  // {sps, pps, avcc, codec, sig}
+var player = null;
+var ws = null;
+var stat = { bytes: 0, frames: 0, drawn: 0, dropped: 0, date: Date.now(), text: '' };
+
+function show(el, visible) { if (visible) { el.classList.remove('off'); } else { el.classList.add('off'); } }
+function message(text) { msgEl.textContent = text || ''; show(msgEl, !!text); }
+
+/* ---------------------------------------------------------------- H.264 */
+
+// Split an Annex B buffer into NAL units (without the start codes)
+function splitNals(u8) {
+    var out = [], n = u8.length, i = 0, start = -1, end;
+    while (i + 2 < n) {
+        if (u8[i + 2] > 1) {
+            i += 3;
+        } else if (u8[i] === 0 && u8[i + 1] === 0 && u8[i + 2] === 1) {
+            if (start >= 0) {
+                end = i;
+                while (end > start && u8[end - 1] === 0) { --end; }
+                out.push(u8.subarray(start, end));
+            }
+            start = i + 3;
+            i += 3;
+        } else {
+            ++i;
+        }
+    }
+    if (start >= 0) { out.push(u8.subarray(start, n)); }
+    return out;
+}
+
+// Annex B -> length-prefixed NAL units (the parameter sets are in the decoder configuration)
+function toAvcc(u8) {
+    var nals = splitNals(u8), keep = [], size = 0, i, t, out, o = 0, len;
+    for (i = 0; i < nals.length; ++i) {
+        t = nals[i][0] & 31;
+        if (t === 7 || t === 8 || t === 9 || !nals[i].length) { continue; }
+        keep.push(nals[i]);
+        size += 4 + nals[i].length;
+    }
+    out = new Uint8Array(size);
+    for (i = 0; i < keep.length; ++i) {
+        len = keep[i].length;
+        out[o] = len >>> 24; out[o + 1] = (len >>> 16) & 255; out[o + 2] = (len >>> 8) & 255; out[o + 3] = len & 255;
+        out.set(keep[i], o + 4);
+        o += 4 + len;
+    }
+    return out;
+}
+
+function hex2(v) { return (v < 16 ? '0' : '') + v.toString(16); }
+
+function parseConfig(u8) {
+    var nals = splitNals(u8), sps = null, pps = null, i, t, avcc, sig = '';
+    for (i = 0; i < nals.length; ++i) {
+        t = nals[i][0] & 31;
+        if (t === 7 && !sps) { sps = nals[i]; }
+        if (t === 8 && !pps) { pps = nals[i]; }
+    }
+    if (!sps || !pps || sps.length < 4) { return null; }
+    avcc = new Uint8Array(11 + sps.length + pps.length);
+    avcc[0] = 1; avcc[1] = sps[1]; avcc[2] = sps[2]; avcc[3] = sps[3]; avcc[4] = 0xff; avcc[5] = 0xe1;
+    avcc[6] = sps.length >> 8; avcc[7] = sps.length & 255;
+    avcc.set(sps, 8);
+    avcc[8 + sps.length] = 1;
+    avcc[9 + sps.length] = pps.length >> 8; avcc[10 + sps.length] = pps.length & 255;
+    avcc.set(pps, 11 + sps.length);
+    for (i = 0; i < avcc.length; ++i) { sig += hex2(avcc[i]); }
+    return { avcc: avcc, codec: 'avc1.' + hex2(sps[1]) + hex2(sps[2]) + hex2(sps[3]), sig: sig };
+}
+
+/* ------------------------------------------------- fragmented MP4 (MSE) */
+
+function u32(v) { return [(v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255]; }
+function u16(v) { return [(v >>> 8) & 255, v & 255]; }
+function str(s) { var a = [], i; for (i = 0; i < s.length; ++i) { a.push(s.charCodeAt(i)); } return a; }
+function zeros(n) { var a = [], i; for (i = 0; i < n; ++i) { a.push(0); } return a; }
+
+// box(type, part...): each part is an array of bytes or a Uint8Array
+function box(type) {
+    var size = 8, i, out, o = 8;
+    for (i = 1; i < arguments.length; ++i) { size += arguments[i].length; }
+    out = new Uint8Array(size);
+    out.set(u32(size), 0);
+    out.set(str(type), 4);
+    for (i = 1; i < arguments.length; ++i) { out.set(arguments[i], o); o += arguments[i].length; }
+    return out;
+}
+
+var MATRIX = [].concat(u32(0x10000), zeros(12), u32(0x10000), zeros(12), u32(0x40000000));
+var TIMESCALE = 1000;
+
+function initSegment(width, height, avcc) {
+    var avc1 = box('avc1', zeros(6), u16(1), zeros(16), u16(width), u16(height), u32(0x480000), u32(0x480000), zeros(4), u16(1),
+                   zeros(32), u16(0x18), u16(0xffff), box('avcC', avcc));
+    var stbl = box('stbl', box('stsd', zeros(4), u32(1), avc1), box('stts', zeros(8)), box('stsc', zeros(8)),
+                   box('stsz', zeros(12)), box('stco', zeros(8)));
+    var minf = box('minf', box('vmhd', u32(1), zeros(8)), box('dinf', box('dref', zeros(4), u32(1), box('url ', u32(1)))), stbl);
+    var mdia = box('mdia', box('mdhd', zeros(12), u32(TIMESCALE), zeros(4), u16(0x55c4), zeros(2)),
+                   box('hdlr', zeros(8), str('vide'), zeros(12), str('QuestView'), [0]), minf);
+    var trak = box('trak', box('tkhd', u32(3), zeros(8), u32(1), zeros(20), zeros(4), MATRIX, u32(width << 16), u32(height << 16)), mdia);
+    var moov = box('moov', box('mvhd', zeros(12), u32(TIMESCALE), zeros(4), u32(0x10000), u16(0x100), zeros(10), MATRIX, zeros(24), u32(2)),
+                   trak, box('mvex', box('trex', zeros(4), u32(1), u32(1), zeros(12))));
+    var ftyp = box('ftyp', str('isom'), u32(0x200), str('isomiso6avc1mp41'));
+    var out = new Uint8Array(ftyp.length + moov.length);
+    out.set(ftyp, 0);
+    out.set(moov, ftyp.length);
+    return out;
+}
+
+// One fragment (moof + mdat) containing one frame
+function fragment(seq, time, duration, key, data) {
+    var MOOF_SIZE = 100;
+    var trun = box('trun', u32(0x000701), u32(1), u32(MOOF_SIZE + 8), u32(duration), u32(data.length), u32(key ? 0x02000000 : 0x01010000));
+    var traf = box('traf', box('tfhd', u32(0x020000), u32(1)), box('tfdt', u32(0x01000000), u32(Math.floor(time / 4294967296)), u32(time >>> 0)),
+                   trun);
+    var moof = box('moof', box('mfhd', zeros(4), u32(seq)), traf);
+    var out = new Uint8Array(moof.length + 8 + data.length);
+    out.set(moof, 0);
+    out.set(u32(8 + data.length), moof.length);
+    out.set(str('mdat'), moof.length + 4);
+    out.set(data, moof.length + 8);
+    return out;
+}
+
+/* -------------------------------------------------------------- players */
+
+function MsePlayer() {
+    var self = this;
+    this.type = 'MSE';
+    this.queue = [];
+    this.sb = null;
+    this.seq = 1;
+    this.time = 0;       // media time of the next frame (ms)
+    this.lastPts = -1;
+    this.lastDur = 16;
+    this.waitKey = true;
+    this.closed = false;
+    this.ms = new MediaSource();
+    this.url = URL.createObjectURL(this.ms);
+    this.ms.addEventListener('sourceopen', function () {
+        if (self.closed || self.sb) { return; }
+        try {
+            self.sb = self.ms.addSourceBuffer('video/mp4; codecs="' + config.codec + '"');
+        } catch (e) {
+            fatal('Браузер не воспроизводит H.264 ' + config.codec + ' через MSE: ' + e.message);
+            return;
+        }
+        self.sb.addEventListener('updateend', function () { self.pump(); });
+        self.queue.unshift(initSegment(hello.width, hello.height, config.avcc));
+        self.pump();
+    });
+    video.src = this.url;
+    this.timer = setInterval(function () { self.chase(); }, 200);
+}
+
+MsePlayer.prototype.feed = function (pts, key, data) {
+    var dur;
+    if (this.waitKey) {
+        if (!key) { return; }
+        this.waitKey = false;
+    }
+    // The duration of a frame is only known when the next one arrives: use the previous one instead of waiting (no added latency,
+    // the media timeline stays contiguous, and the live edge is chased anyway)
+    if (this.lastPts >= 0) {
+        dur = Math.round((pts - this.lastPts) / 1000);
+        this.lastDur = dur < 5 ? 5 : dur > 100 ? 100 : dur;
+    }
+    this.lastPts = pts;
+    this.queue.push(fragment(this.seq++, this.time, this.lastDur, key, data));
+    this.time += this.lastDur;
+    this.pump();
+};
+
+MsePlayer.prototype.pump = function () {
+    var sb = this.sb, total = 0, i, buf, o = 0;
+    if (this.closed || !sb || sb.updating || !this.queue.length) { return; }
+    if (this.queue.length === 1) {
+        buf = this.queue[0];
+    } else {
+        for (i = 0; i < this.queue.length; ++i) { total += this.queue[i].length; }
+        buf = new Uint8Array(total);
+        for (i = 0; i < this.queue.length; ++i) { buf.set(this.queue[i], o); o += this.queue[i].length; }
+    }
+    this.queue = [];
+    try {
+        sb.appendBuffer(buf);
+    } catch (e) {
+        // Typically QuotaExceededError: restart from a key frame
+        restartPlayer('key');
+    }
+};
+
+// Stay close to the live edge
+MsePlayer.prototype.chase = function () {
+    var b, end, lag, sb = this.sb;
+    if (this.closed || !sb) { return; }
+    b = video.buffered;
+    if (!b.length) { return; }
+    end = b.end(b.length - 1);
+    lag = end - video.currentTime;
+    this.lag = lag;
+    if (lag > Math.max(0.5, local.lat * 4) || lag < -0.05) {
+        try { video.currentTime = Math.max(b.start(b.length - 1), end - local.lat / 2); } catch (e) { /* ignore */ }
+    } else if (lag > local.lat * 1.5) {
+        video.playbackRate = 1.12;
+    } else if (lag < local.lat) {
+        video.playbackRate = 1;
+    }
+    if (video.paused) { tryPlay(); }
+    if (!sb.updating && end - b.start(0) > 12) {
+        try { sb.remove(0, end - 4); } catch (e) { /* ignore */ }
+    }
+};
+
+MsePlayer.prototype.destroy = function () {
+    this.closed = true;
+    clearInterval(this.timer);
+    try { video.removeAttribute('src'); video.load(); } catch (e) { /* ignore */ }
+    try { URL.revokeObjectURL(this.url); } catch (e2) { /* ignore */ }
+};
+
+function WebCodecsPlayer() {
+    var self = this;
+    this.type = 'WebCodecs';
+    this.waitKey = true;
+    this.pending = null;
+    this.closed = false;
+    this.dec = new VideoDecoder({
+        output: function (frame) {
+            if (self.closed) { frame.close(); return; }
+            if (self.pending) { self.pending.close(); ++stat.dropped; }
+            self.pending = frame;
+            requestDraw();
+        },
+        error: function (e) {
+            if (self.closed) { return; }
+            // Not supported by this browser/hardware: use MSE instead
+            local.player = 'mse';
+            restartPlayer('key');
+            console.log('VideoDecoder error: ' + e.message);
+        }
+    });
+    this.dec.configure({ codec: config.codec, description: config.avcc, optimizeForLatency: true });
+}
+
+WebCodecsPlayer.prototype.feed = function (pts, key, data) {
+    if (this.waitKey) {
+        if (!key) { return; }
+        this.waitKey = false;
+    }
+    if (this.dec.decodeQueueSize > 8) {
+        // The decoder is too slow: resume from a new key frame
+        this.waitKey = true;
+        ++stat.dropped;
+        send('key');
+        return;
+    }
+    try {
+        this.dec.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: pts, data: data }));
+    } catch (e) {
+        this.waitKey = true;
+        send('key');
+    }
+};
+
+WebCodecsPlayer.prototype.destroy = function () {
+    this.closed = true;
+    if (this.pending) { this.pending.close(); this.pending = null; }
+    try { this.dec.close(); } catch (e) { /* ignore */ }
+};
+
+function tryPlay() {
+    var p;
+    try { p = video.play(); if (p && p['catch']) { p['catch'](function () { /* autoplay refused: retried later */ }); } } catch (e) { /* ignore */ }
+}
+
+function fatal(text) {
+    if (player) { player.destroy(); player = null; }
+    message(text);
+}
+
+function createPlayer() {
+    var canWc = typeof window.VideoDecoder === 'function' && typeof window.EncodedVideoChunk === 'function';
+    var canMse = typeof window.MediaSource === 'function';
+    var want = local.player;
+    if (player) { player.destroy(); player = null; }
+    if (!config || !hello || !hello.width) { return; }
+    if ((want === 'webcodecs' || want === 'auto') && canWc) {
+        try { player = new WebCodecsPlayer(); } catch (e) { player = null; }
+    }
+    if (!player && canMse) {
+        player = new MsePlayer();
+    }
+    if (!player) {
+        fatal('Этот браузер не умеет ни MSE, ни WebCodecs — видео H.264 показать нечем.');
+        return;
+    }
+    glBlackChecks = 0;
+    layout();
+}
+
+// Recreate the player; the stream resumes from the next key frame
+function restartPlayer(command) {
+    createPlayer();
+    if (command) { send(command); }
+}
+
+/* ------------------------------------------------- Quest picture (WebGL) */
+
+// Same values as app/src/quest.c (and QuestParams.java): {x0, x1, y0, y1}
+var PRESETS = { A: [0.131, 0.869, 0.097, 0.512], B: [0.151, 0.849, 0.045, 0.631], C: [0.194, 0.811, 0.026, 0.740], D: [0, 1, 0, 1] };
+var EYE_PRESETS = { A: [0.12, 0.88, 0.30, 0.70], B: [0.12, 0.88, 0.18, 0.82], C: [0.20, 0.80, 0.08, 0.92], D: [0, 1, 0, 1] };
+
+// Same function as QuestOpenGLFilter.QUEST_MAP_GLSL (processing on the device)
+var QUEST_MAP_GLSL = [
+    'uniform float u_eye;',
+    'uniform vec2 u_cs;',
+    'uniform vec2 u_k;',
+    'uniform float u_off;',
+    'uniform float u_cut;',
+    'uniform vec4 u_crop;',
+    'uniform float u_aspect;',
+    'vec3 quest_map(vec2 uv) {',
+    '    float out_w = u_eye < 0.5 ? 1.0 + u_off : 1.0;',
+    '    float ox = mix(u_crop.x, u_crop.z, uv.x) * out_w;',
+    '    float oy = mix(u_crop.y, u_crop.w, uv.y);',
+    '    float eye = u_eye - 1.0;',
+    '    if (u_eye < 0.5) {',
+    '        if (ox < u_cut) {',
+    '            eye = 0.0;',
+    '        } else {',
+    '            eye = 1.0;',
+    '            ox -= u_off;',
+    '        }',
+    '    }',
+    '    float sa = eye < 0.5 ? -u_cs.y : u_cs.y;',
+    '    vec2 c = vec2(0.5 * u_aspect, 0.5);',
+    '    vec2 d = vec2(ox * u_aspect, oy) - c;',
+    '    vec2 u = vec2(d.x * u_cs.x - d.y * sa, d.x * sa + d.y * u_cs.x);',
+    '    float r2 = dot(u, u) / dot(c, c);',
+    '    vec2 s = c + u * (1.0 + u_k.x * r2 + u_k.y * r2 * r2);',
+    '    float valid = abs(u.x) <= c.x && abs(u.y) <= c.y',
+    '            && s.x >= 0.0 && s.y >= 0.0 && s.x <= u_aspect && s.y <= 1.0 ? 1.0 : 0.0;',
+    '    return vec3((clamp(s.x / u_aspect, 0.0005, 0.9995) + eye) * 0.5, s.y, valid);',
+    '}'
+].join('\n');
+
+var gl = null, glLoc = null, glTried = false, glBlackChecks = 0, glBlack = 0;
+
+function initGl() {
+    var vs, fs, prog, buf, names, i;
+    if (glTried) { return !!gl; }
+    glTried = true;
+    try {
+        gl = canvas.getContext('webgl', { alpha: false, antialias: false }) || canvas.getContext('experimental-webgl', { alpha: false });
+    } catch (e) { gl = null; }
+    if (!gl) { return false; }
+    function compile(type, src) {
+        var s = gl.createShader(type);
+        gl.shaderSource(s, src);
+        gl.compileShader(s);
+        if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) { throw new Error(gl.getShaderInfoLog(s)); }
+        return s;
+    }
+    try {
+        vs = compile(gl.VERTEX_SHADER, 'attribute vec2 a_pos; varying vec2 uv;\n'
+            + 'void main() { gl_Position = vec4(a_pos, 0.0, 1.0); uv = vec2(a_pos.x * 0.5 + 0.5, 0.5 - a_pos.y * 0.5); }');
+        fs = compile(gl.FRAGMENT_SHADER, '#ifdef GL_FRAGMENT_PRECISION_HIGH\nprecision highp float;\n#else\nprecision mediump float;\n#endif\n'
+            + 'uniform sampler2D tex; uniform float u_flat; varying vec2 uv;\n' + QUEST_MAP_GLSL + '\n'
+            + 'void main() {\n'
+            + '    if (u_flat > 0.5) { gl_FragColor = texture2D(tex, uv); return; }\n'
+            + '    vec3 src = quest_map(uv);\n'
+            + '    gl_FragColor = src.z > 0.5 ? texture2D(tex, src.xy) : vec4(0.0, 0.0, 0.0, 1.0);\n'
+            + '}');
+        prog = gl.createProgram();
+        gl.attachShader(prog, vs);
+        gl.attachShader(prog, fs);
+        gl.linkProgram(prog);
+        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { throw new Error(gl.getProgramInfoLog(prog)); }
+    } catch (e2) {
+        console.log('WebGL: ' + e2.message);
+        gl = null;
+        return false;
+    }
+    gl.useProgram(prog);
+    buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    i = gl.getAttribLocation(prog, 'a_pos');
+    gl.enableVertexAttribArray(i);
+    gl.vertexAttribPointer(i, 2, gl.FLOAT, false, 0, 0);
+    gl.bindTexture(gl.TEXTURE_2D, gl.createTexture());
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    glLoc = {};
+    names = ['tex', 'u_flat', 'u_eye', 'u_cs', 'u_k', 'u_off', 'u_cut', 'u_crop', 'u_aspect'];
+    for (i = 0; i < names.length; ++i) { glLoc[names[i]] = gl.getUniformLocation(prog, names[i]); }
+    gl.uniform1i(glLoc.tex, 0);
+    return true;
+}
+
+function isFlat() { return !quest || quest.process === 'device'; }
+
+// Geometry of the picture displayed for the current stream and parameters
+function getView() {
+    var w = hello.width, h = hello.height, eye, crop, off, outW;
+    if (isFlat()) { return { flat: true, w: w, h: h }; }
+    eye = quest.eye === 'left' ? 1 : quest.eye === 'right' ? 2 : 0;
+    crop = (eye ? EYE_PRESETS : PRESETS)[quest.preset] || PRESETS.D;
+    off = 1 - quest.ovfrac;
+    outW = eye ? 1 : 1 + off;
+    return {
+        flat: false, eye: eye, crop: crop, off: off,
+        cut: Math.min(1, Math.max(off, off + quest.ovfrac / 2 + quest.seam_x)),
+        aspect: (w / 2) / h,
+        w: Math.round((crop[1] - crop[0]) * outW * (w / 2)),
+        h: Math.round((crop[3] - crop[2]) * h)
+    };
+}
+
+var useCanvas = false;
+
+function layout() {
+    var view, maxW, maxH, scale, a;
+    if (!hello || !hello.width || !player) { return; }
+    view = getView();
+    // A flat stream played by MSE is displayed by the <video> element itself (the most compatible way)
+    useCanvas = !(view.flat && player.type === 'MSE');
+    if (useCanvas && !view.flat && !initGl()) {
+        // No WebGL: the raw buffer cannot be processed here, ask the device to do it
+        useCanvas = player.type !== 'MSE';
+        send('set process=device');
+    }
+    show(canvas, useCanvas);
+    if (useCanvas) { video.classList.add('feed'); } else { video.classList.remove('feed'); }
+    if (!useCanvas) { return; }
+    // No need to render more pixels than the screen
+    maxW = Math.max(320, window.innerWidth * (window.devicePixelRatio || 1));
+    maxH = Math.max(240, window.innerHeight * (window.devicePixelRatio || 1));
+    scale = Math.min(1, maxW / view.w, maxH / view.h);
+    canvas.width = Math.max(2, Math.round(view.w * scale));
+    canvas.height = Math.max(2, Math.round(view.h * scale));
+    if (initGl()) {
+        gl.viewport(0, 0, canvas.width, canvas.height);
+        gl.uniform1f(glLoc.u_flat, view.flat ? 1 : 0);
+        if (!view.flat) {
+            a = quest.angle * Math.PI / 180;
+            gl.uniform1f(glLoc.u_eye, view.eye);
+            gl.uniform2f(glLoc.u_cs, Math.cos(a), Math.sin(a));
+            gl.uniform2f(glLoc.u_k, quest.k1, quest.k2);
+            gl.uniform1f(glLoc.u_off, view.off);
+            gl.uniform1f(glLoc.u_cut, view.cut);
+            gl.uniform4f(glLoc.u_crop, view.crop[0], view.crop[2], view.crop[1], view.crop[3]);
+            gl.uniform1f(glLoc.u_aspect, view.aspect);
+        }
+    }
+}
+
+var ctx2d = null;
+
+function drawSource(source) {
+    if (gl) {
+        try {
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, source);
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        } catch (e) { /* the frame is not available yet */ }
+    } else {
+        ctx2d = ctx2d || canvas.getContext('2d');
+        if (ctx2d) { ctx2d.drawImage(source, 0, 0, canvas.width, canvas.height); }
+    }
+    ++stat.drawn;
+}
+
+// Some TV browsers render the video on a separate hardware plane: the texture stays black. In that case, ask the device to do the
+// processing, so that the <video> element can be displayed directly.
+function checkBlack() {
+    var px, i, sum = 0;
+    if (!gl || !player || player.type !== 'MSE' || isFlat() || qs.noblackcheck) { return; }
+    if (++glBlackChecks % 60 !== 0) { return; }
+    px = new Uint8Array(4 * 16 * 16);
+    gl.readPixels((canvas.width >> 1) - 8, (canvas.height >> 1) - 8, 16, 16, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    for (i = 0; i < px.length; i += 4) { sum += px[i] + px[i + 1] + px[i + 2]; }
+    glBlack = sum === 0 ? glBlack + 1 : 0;
+    if (glBlack >= 4) {
+        glBlack = 0;
+        send('set process=device');
+    }
+}
+
+var drawScheduled = false, lastVideoTime = -1;
+
+function requestDraw() {
+    if (!drawScheduled) {
+        drawScheduled = true;
+        window.requestAnimationFrame(drawFrame);
+    }
+}
+
+function drawFrame() {
+    var frame;
+    drawScheduled = false;
+    if (!player) { return; }
+    if (player.type === 'WebCodecs') {
+        frame = player.pending;
+        if (frame) {
+            player.pending = null;
+            if (useCanvas) { drawSource(frame); }
+            frame.close();
+            if (msgEl.textContent) { message(''); }
+        }
+    } else if (useCanvas && video.readyState >= 2 && video.currentTime !== lastVideoTime) {
+        lastVideoTime = video.currentTime;
+        drawSource(video);
+        checkBlack();
+    }
+}
+
+// MSE: redraw the canvas for every new video frame
+function videoLoop() {
+    if (player && player.type === 'MSE') {
+        if (useCanvas) { drawFrame(); } else if (video.currentTime !== lastVideoTime) { lastVideoTime = video.currentTime; ++stat.drawn; }
+        if (msgEl.textContent && video.readyState >= 2 && video.currentTime > 0) { message(''); }
+    }
+    if (video.requestVideoFrameCallback) {
+        video.requestVideoFrameCallback(videoLoop);
+    } else {
+        window.requestAnimationFrame(videoLoop);
+    }
+}
+if (video.requestVideoFrameCallback) {
+    // The callback is only called while frames are presented: also poll, slowly, for the state changes
+    setInterval(function () { if (player && player.type === 'MSE' && useCanvas) { drawFrame(); } }, 250);
+}
+videoLoop();
+
+/* ------------------------------------------------------------ WebSocket */
+
+var reconnectTimer = null, hiddenTimer = null, lastMessage = 0;
+
+function send(text) {
+    if (ws && ws.readyState === 1) { ws.send(text); }
+}
+
+function onHello(h) {
+    var changed = !hello || hello.width !== h.width || hello.height !== h.height
+        || (hello.quest && h.quest && hello.quest.process !== h.quest.process);
+    hello = h;
+    quest = h.quest;
+    if (changed) {
+        // A new stream starts (its config and a key frame follow)
+        config = null;
+        if (player) { player.destroy(); player = null; }
+    }
+    if (!h.width) { message('Очки на связи, ждём видео…'); }
+    layout();
+    renderMenu();
+}
+
+function onBinary(u8) {
+    var type = u8[0], key = (u8[1] & 1) !== 0, pts, c;
+    if (u8.length < 10) { return; }
+    pts = ((u8[2] << 24 | u8[3] << 16 | u8[4] << 8 | u8[5]) >>> 0) * 4294967296 + ((u8[6] << 24 | u8[7] << 16 | u8[8] << 8 | u8[9]) >>> 0);
+    if (type === 1) {
+        c = parseConfig(u8.subarray(10));
+        if (!c) { return; }
+        if (config && config.sig === c.sig && player) { return; }
+        config = c;
+        createPlayer();
+    } else if (type === 2 && player) {
+        stat.bytes += u8.length;
+        ++stat.frames;
+        player.feed(pts, key, toAvcc(u8.subarray(10)));
+    }
+}
+
+function connect() {
+    var url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+    reconnectTimer = null;
+    if (ws) { return; }
+    try { ws = new WebSocket(qs.ws || url); } catch (e) { scheduleReconnect(); return; }
+    ws.binaryType = 'arraybuffer';
+    ws.onmessage = function (e) {
+        lastMessage = Date.now();
+        if (typeof e.data === 'string') {
+            try {
+                var m = JSON.parse(e.data);
+                if (m.type === 'hello') { onHello(m); }
+            } catch (err) { console.log('message: ' + err.message); }
+        } else {
+            onBinary(new Uint8Array(e.data));
+        }
+    };
+    ws.onclose = function () {
+        ws = null;
+        hello = null;
+        config = null;
+        if (player) { player.destroy(); player = null; }
+        if (!document.hidden) { message('Нет связи с очками, переподключение…'); }
+        scheduleReconnect();
+    };
+    ws.onerror = function () { /* onclose follows */ };
+}
+
+function scheduleReconnect() {
+    if (!reconnectTimer && !document.hidden) { reconnectTimer = setTimeout(connect, 1500); }
+}
+
+setInterval(function () {
+    send('p');
+    // The headset went to sleep or left the network without closing the connection
+    if (ws && ws.readyState === 1 && lastMessage && Date.now() - lastMessage > 8000 && hello && hello.width) {
+        lastMessage = Date.now();
+        try { ws.close(); } catch (e) { /* ignore */ }
+    }
+}, 3000);
+
+// Do not make the headset capture and encode for a hidden page
+document.addEventListener('visibilitychange', function () {
+    clearTimeout(hiddenTimer);
+    if (document.hidden) {
+        hiddenTimer = setTimeout(function () { if (ws) { ws.close(); } }, 15000);
+    } else if (!ws) {
+        connect();
+    }
+});
+
+/* ----------------------------------------------------------------- menu */
+
+function fmt(v, digits) { return (+v).toFixed(digits); }
+function cycle(list, value, dir) {
+    var i = list.indexOf(value);
+    return list[(i + dir + list.length) % list.length];
+}
+function setQuest(key, value) { send('set ' + key + '=' + value); }
+
+var EYE_LABEL = { left: 'левый', right: 'правый', both: 'оба (шов)' };
+var PLAYER_LABEL = { auto: 'авто', mse: 'MSE', webcodecs: 'WebCodecs' };
+
+var ROWS = [
+    { name: 'Обработка картинки', get: function () { return quest.process === 'device' ? 'на очках' : 'в браузере'; },
+      step: function () { setQuest('process', quest.process === 'device' ? 'page' : 'device'); } },
+    { name: 'Глаз', get: function () { return EYE_LABEL[quest.eye]; },
+      step: function (d) { setQuest('eye', cycle(['left', 'right', 'both'], quest.eye, d)); } },
+    { name: 'Вид (кадрирование)', get: function () { return quest.preset; },
+      step: function (d) { setQuest('preset', cycle(['A', 'B', 'C', 'D'], quest.preset, d)); } },
+    { name: 'Размер потока', get: function () { return quest.box; },
+      step: function (d) { setQuest('box', cycle(['1280x720', '1920x1080', '2560x1440', '3840x2160'], quest.box, d)); } },
+    { name: 'Угол поворота', get: function () { return fmt(quest.angle, 1) + '°'; },
+      step: function (d) { setQuest('angle', fmt(quest.angle + d * 0.1, 2)); } },
+    { name: 'Линза k1', get: function () { return fmt(quest.k1, 2); }, step: function (d) { setQuest('k1', fmt(quest.k1 + d * 0.01, 3)); } },
+    { name: 'Линза k2', get: function () { return fmt(quest.k2, 2); }, step: function (d) { setQuest('k2', fmt(quest.k2 + d * 0.01, 3)); } },
+    { name: 'Перекрытие глаз', get: function () { return fmt(quest.ovfrac, 3); },
+      step: function (d) { setQuest('ovfrac', fmt(quest.ovfrac + d * 0.002, 4)); } },
+    { name: 'Сдвиг шва', get: function () { return fmt(quest.seam_x, 3); },
+      step: function (d) { setQuest('seam_x', fmt(quest.seam_x + d * 0.005, 4)); } },
+    { name: 'Плеер', local: true, get: function () { return PLAYER_LABEL[local.player] + (player ? ' → ' + player.type : ''); },
+      step: function (d) { local.player = cycle(['auto', 'mse', 'webcodecs'], local.player, d); saveLocal('player', local.player);
+                           restartPlayer('key'); renderMenu(); } },
+    { name: 'Статистика', local: true, get: function () { return local.stats ? 'вкл' : 'выкл'; },
+      step: function () { local.stats = !local.stats; saveLocal('stats', local.stats ? '1' : '0'); show(statsEl, local.stats); renderMenu(); } }
+];
+
+var menuOpen = false, menuSel = 0;
+
+function renderMenu() {
+    var html = '<h1>QuestView</h1>', i, row, usable;
+    if (!menuOpen) { return; }
+    for (i = 0; i < ROWS.length; ++i) {
+        row = ROWS[i];
+        usable = row.local || quest;
+        html += '<div class="row' + (i === menuSel ? ' sel' : '') + '" data-i="' + i + '"><span class="name">' + row.name + '</span>'
+            + '<button data-d="-1">◀</button><span class="val">' + (usable ? row.get() : '—') + '</span><button data-d="1">▶</button></div>';
+    }
+    html += '<div class="note">↑ ↓ — строка, ← → — значение, OK — закрыть. Параметры картинки общие для всех зрителей '
+        + 'и действуют до перезапуска трансляции.</div>';
+    menuEl.innerHTML = html;
+}
+
+function toggleMenu(open) {
+    menuOpen = open;
+    show(menuEl, open);
+    show(hintEl, false);
+    renderMenu();
+}
+
+function stepRow(i, dir) {
+    var row = ROWS[i];
+    menuSel = i;
+    if (row.local || quest) { row.step(dir); }
+    renderMenu();
+}
+
+menuEl.addEventListener('click', function (e) {
+    var t = e.target, d = t.getAttribute && t.getAttribute('data-d'), rowEl = t;
+    e.stopPropagation();
+    while (rowEl && rowEl !== menuEl && !(rowEl.getAttribute && rowEl.getAttribute('data-i'))) { rowEl = rowEl.parentNode; }
+    if (!rowEl || rowEl === menuEl) { return; }
+    if (d) { stepRow(+rowEl.getAttribute('data-i'), +d); } else { menuSel = +rowEl.getAttribute('data-i'); renderMenu(); }
+});
+
+$('stage').addEventListener('click', function () { tryPlay(); toggleMenu(!menuOpen); });
+
+document.addEventListener('keydown', function (e) {
+    var k = e.keyCode;
+    if (k === 13 || k === 32) { toggleMenu(!menuOpen); e.preventDefault(); return; }
+    if (!menuOpen) {
+        if (k === 73) { ROWS[ROWS.length - 1].step(); } // I: statistics
+        return;
+    }
+    if (k === 27 || k === 8 || k === 461 || k === 10009) { toggleMenu(false); e.preventDefault(); }
+    else if (k === 38) { menuSel = (menuSel + ROWS.length - 1) % ROWS.length; renderMenu(); e.preventDefault(); }
+    else if (k === 40) { menuSel = (menuSel + 1) % ROWS.length; renderMenu(); e.preventDefault(); }
+    else if (k === 37) { stepRow(menuSel, -1); e.preventDefault(); }
+    else if (k === 39) { stepRow(menuSel, 1); e.preventDefault(); }
+});
+
+setTimeout(function () { show(hintEl, false); }, 8000);
+window.addEventListener('resize', layout);
+
+/* ---------------------------------------------------------------- stats */
+
+setInterval(function () {
+    var now = Date.now(), dt = (now - stat.date) / 1000, text;
+    if (dt <= 0) { return; }
+    text = (player ? player.type : '—') + '  ' + (hello && hello.width ? hello.width + '×' + hello.height : '—')
+        + '  ' + (quest ? (quest.process === 'device' ? 'обработка на очках' : 'обработка в браузере') : '')
+        + '\nприём ' + fmt(stat.frames / dt, 0) + ' к/с, ' + fmt(stat.bytes * 8 / dt / 1e6, 1) + ' Мбит/с'
+        + '  показ ' + fmt(stat.drawn / dt, 0) + ' к/с'
+        + (player && player.type === 'MSE' && player.lag !== undefined ? '  буфер ' + fmt(player.lag * 1000, 0) + ' мс' : '')
+        + (stat.dropped ? '  пропущено ' + stat.dropped : '');
+    stat.text = text;
+    stat.fps = stat.drawn / dt;
+    stat.bytes = 0; stat.frames = 0; stat.drawn = 0; stat.dropped = 0; stat.date = now;
+    if (local.stats) { statsEl.textContent = text; }
+}, 1000);
+show(statsEl, local.stats);
+
+// For the automated tests
+window.questview = {
+    state: function () {
+        return { player: player ? player.type : null, hello: hello, useCanvas: useCanvas, gl: !!gl, stats: stat.text, fps: stat.fps || 0,
+                 videoTime: video.currentTime, videoWidth: video.videoWidth, lag: player && player.lag, message: msgEl.textContent,
+                 canvas: [canvas.width, canvas.height] };
+    },
+    send: send,
+    // Draw the current video frame with the shader and read the picture back, as gray levels (BT.709), top row first
+    grab: function () {
+        var w = canvas.width, h = canvas.height, px, out, x, y, i, bin = '';
+        if (!gl || !useCanvas || !player || player.type !== 'MSE') { return null; }
+        drawSource(video);
+        px = new Uint8Array(w * h * 4);
+        gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+        out = new Uint8Array(w * h);
+        for (y = 0; y < h; ++y) {
+            for (x = 0; x < w; ++x) {
+                i = ((h - 1 - y) * w + x) * 4;
+                out[y * w + x] = Math.round(0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2]);
+            }
+        }
+        for (i = 0; i < out.length; i += 8192) { bin += String.fromCharCode.apply(null, out.subarray(i, i + 8192)); }
+        return { w: w, h: h, gray: window.btoa(bin) };
+    }
+};
+
+connect();
+})();
+</script>
+</body>
+</html>

@@ -3,6 +3,7 @@ package com.genymobile.scrcpy.device;
 import com.genymobile.scrcpy.audio.AudioCodec;
 import com.genymobile.scrcpy.util.Codec;
 import com.genymobile.scrcpy.util.IO;
+import com.genymobile.scrcpy.web.WebServer;
 
 import android.media.MediaCodec;
 
@@ -21,6 +22,7 @@ public final class Streamer {
     private final Codec codec;
     private final boolean sendCodecMeta;
     private final boolean sendFrameMeta;
+    private final WebServer webServer; // if not null, the packets are sent to the web clients instead of the scrcpy client
 
     private final ByteBuffer headerBuffer = ByteBuffer.allocate(12);
 
@@ -29,6 +31,19 @@ public final class Streamer {
         this.codec = codec;
         this.sendCodecMeta = sendCodecMeta;
         this.sendFrameMeta = sendFrameMeta;
+        this.webServer = null;
+    }
+
+    public Streamer(WebServer webServer, Codec codec) {
+        this.fd = null;
+        this.codec = codec;
+        this.sendCodecMeta = false;
+        this.sendFrameMeta = false;
+        this.webServer = webServer;
+    }
+
+    public WebServer getWebServer() {
+        return webServer;
     }
 
     public Codec getCodec() {
@@ -45,6 +60,10 @@ public final class Streamer {
     }
 
     public void writeVideoHeader(Size videoSize) throws IOException {
+        if (webServer != null) {
+            webServer.setVideoSize(videoSize.getWidth(), videoSize.getHeight());
+            return;
+        }
         if (sendCodecMeta) {
             ByteBuffer buffer = ByteBuffer.allocate(12);
             buffer.putInt(codec.getId());
@@ -67,6 +86,10 @@ public final class Streamer {
     }
 
     public void writePacket(ByteBuffer buffer, long pts, boolean config, boolean keyFrame) throws IOException {
+        if (webServer != null) {
+            webServer.writePacket(buffer, pts, config, keyFrame);
+            return;
+        }
         if (config) {
             if (codec == AudioCodec.OPUS) {
                 fixOpusConfigPacket(buffer);

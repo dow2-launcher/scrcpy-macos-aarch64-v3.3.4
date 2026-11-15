@@ -1,6 +1,7 @@
 package com.genymobile.scrcpy.video;
 
 import android.media.MediaCodec;
+import android.os.Bundle;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -20,6 +21,21 @@ public class CaptureReset implements SurfaceCapture.CaptureListener {
         if (runningMediaCodec != null) {
             try {
                 runningMediaCodec.signalEndOfInputStream();
+            } catch (IllegalStateException e) {
+                // ignore
+            }
+        }
+    }
+
+    /**
+     * Ask the running encoder (if any) to produce a key frame as soon as possible.
+     */
+    public synchronized void requestKeyFrame() {
+        if (runningMediaCodec != null) {
+            try {
+                Bundle params = new Bundle();
+                params.putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0);
+                runningMediaCodec.setParameters(params);
             } catch (IllegalStateException e) {
                 // ignore
             }

@@ -11,9 +11,11 @@ import com.genymobile.scrcpy.device.Size;
 import com.genymobile.scrcpy.opengl.AffineOpenGLFilter;
 import com.genymobile.scrcpy.opengl.OpenGLFilter;
 import com.genymobile.scrcpy.opengl.OpenGLRunner;
+import com.genymobile.scrcpy.opengl.QuestOpenGLFilter;
 import com.genymobile.scrcpy.util.AffineMatrix;
 import com.genymobile.scrcpy.util.Ln;
 import com.genymobile.scrcpy.util.LogUtils;
+import com.genymobile.scrcpy.web.QuestParams;
 import com.genymobile.scrcpy.wrappers.ServiceManager;
 import com.genymobile.scrcpy.wrappers.SurfaceControl;
 
@@ -46,6 +48,10 @@ public class ScreenCapture extends SurfaceCapture {
     private AffineMatrix transform;
     private OpenGLRunner glRunner;
 
+    // Meta Quest picture processing on the device (web mode), may be null
+    private final QuestParams questParams;
+    private boolean questFilter;
+
     public ScreenCapture(VirtualDisplayListener vdListener, Options options) {
         this.vdListener = vdListener;
         this.displayId = options.getDisplayId();
@@ -57,6 +63,7 @@ public class ScreenCapture extends SurfaceCapture {
         assert captureOrientationLock != null;
         assert captureOrientation != null;
         this.angle = options.getAngle();
+        this.questParams = options.getWebPort() != 0 ? options.getQuestParams() : null;
     }
 
     @Override
@@ -83,6 +90,15 @@ public class ScreenCapture extends SurfaceCapture {
             // The user requested to lock the video orientation to the current orientation
             captureOrientationLock = Orientation.Lock.LockedValue;
             captureOrientation = Orientation.fromRotation(displayInfo.getRotation());
+        }
+
+        questFilter = questParams != null && questParams.isDevice();
+        if (questFilter) {
+            // The whole processing (including the crop and the downscale) is done by QuestOpenGLFilter
+            transform = null;
+            int[] size = questParams.getOutputSize(displaySize.getWidth(), displaySize.getHeight());
+            videoSize = new Size(size[0], size[1]);
+            return;
         }
 
         VideoFilter filter = new VideoFilter(displaySize);
@@ -112,7 +128,13 @@ public class ScreenCapture extends SurfaceCapture {
         }
 
         Size inputSize;
-        if (transform != null) {
+        if (questFilter) {
+            inputSize = displayInfo.getSize();
+            assert glRunner == null;
+            OpenGLFilter glFilter = new QuestOpenGLFilter(questParams, inputSize.getWidth(), inputSize.getHeight());
+            glRunner = new OpenGLRunner(glFilter);
+            surface = glRunner.start(inputSize, videoSize, surface);
+        } else if (transform != null) {
             // If there is a filter, it must receive the full display content
             inputSize = displayInfo.getSize();
             assert glRunner == null;
@@ -165,6 +187,19 @@ public class ScreenCapture extends SurfaceCapture {
         if (glRunner != null) {
             glRunner.stopAndRelease();
             glRunner = null;
+        }
+    }
+
+    @Override
+    public void suspend() {
+        // Do not keep mirroring the display to a surface nobody reads
+        if (display != null) {
+            SurfaceControl.destroyDisplay(display);
+            display = null;
+        }
+        if (virtualDisplay != null) {
+            virtualDisplay.release();
+            virtualDisplay = null;
         }
     }
 
