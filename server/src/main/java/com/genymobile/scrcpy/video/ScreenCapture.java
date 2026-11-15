@@ -224,6 +224,11 @@ public class ScreenCapture extends SurfaceCapture {
 
     @Override
     public boolean setMaxSize(int newMaxSize) {
+        if (questFilter) {
+            // The size of the processed picture does not depend on maxSize: reduce the box instead (if it is not reduced, the encoder must
+            // not retry with the same size indefinitely)
+            return questParams.set("box", newMaxSize + "x" + newMaxSize) != QuestParams.UNCHANGED;
+        }
         maxSize = newMaxSize;
         return true;
     }
