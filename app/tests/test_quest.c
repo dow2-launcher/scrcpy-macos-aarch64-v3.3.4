@@ -264,9 +264,9 @@ static void test_presets_and_keys(void) {
         assert(out->height == eye_expected[i].h);
     }
 
-    // Reset
+    // Reset (the default is the left eye only since 15.11)
     sc_quest_handle_key(&q, SDL_SCANCODE_0, false);
-    assert(q.params.eye == SC_QUEST_EYE_BOTH);
+    assert(q.params.eye == SC_QUEST_EYE_LEFT);
     assert(q.params.seam == SC_QUEST_SEAM_AUTO);
     assert(q.params.angle == default_params.angle);
     assert(q.params.preset == SC_QUEST_PRESET_B);
@@ -281,9 +281,11 @@ static void test_presets_and_keys(void) {
     assert(q.restart.bit_rate == 30000000);
     assert(sc_quest_handle_key(&q, SDL_SCANCODE_T, false));
     assert(q.restart.decode_threads == 1);
-    assert(sc_quest_get_auto_decode_threads(30000000) == 1);
-    assert(sc_quest_get_auto_decode_threads(40000000) == 2);
-    assert(sc_quest_get_auto_decode_threads(80000000) == 3);
+    // Automatic: all the CPU cores (1 to 16), whatever the bit rate
+    assert(sc_quest_get_auto_decode_threads(30000000) >= 1);
+    assert(sc_quest_get_auto_decode_threads(30000000) <= 16);
+    assert(sc_quest_get_auto_decode_threads(30000000)
+            == sc_quest_get_auto_decode_threads(80000000));
     assert(sc_quest_handle_key(&q, SDL_SCANCODE_H, false));
     assert(q.restart.codec == SC_CODEC_H265);
     assert(q.params.bit_rate == 50000000);
