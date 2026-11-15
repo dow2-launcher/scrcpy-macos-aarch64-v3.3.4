@@ -834,6 +834,7 @@ aoa_complete:
             .quest_params = options->quest_params,
             .quest_set = options->quest_set,
             .quest_config = options->quest_config,
+            .quest_perf = options->quest_perf,
         };
 
         if (!sc_screen_init(&s->screen, &screen_params)) {

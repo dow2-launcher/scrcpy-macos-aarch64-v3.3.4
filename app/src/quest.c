@@ -15,7 +15,31 @@
 # include <unistd.h>
 #endif
 
-atomic_uint_least64_t sc_quest_video_bytes;
+struct sc_quest_stats sc_quest_stats;
+
+void
+sc_quest_stats_on_frame(int64_t pts, sc_tick decode_duration, sc_tick now) {
+    struct sc_quest_stats *stats = &sc_quest_stats;
+    atomic_fetch_add_explicit(&stats->decoded_frames, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&stats->decode_us, decode_duration,
+                              memory_order_relaxed);
+
+    // The PTS is expressed in microseconds on the device clock, so only the
+    // variations of (now - pts) are meaningful. Only this thread writes these
+    // values.
+    int64_t delay = now - pts;
+    int64_t min = atomic_load_explicit(&stats->delay_min,
+                                       memory_order_relaxed);
+    if (!atomic_load_explicit(&stats->has_delay_min, memory_order_relaxed)
+            || delay < min) {
+        min = delay;
+        atomic_store_explicit(&stats->delay_min, min, memory_order_relaxed);
+        atomic_store_explicit(&stats->has_delay_min, true,
+                              memory_order_relaxed);
+    }
+    atomic_fetch_add_explicit(&stats->delay_us, delay - min,
+                              memory_order_relaxed);
+}
 
 // Video bit rates selectable live
 static const uint32_t bit_rates[] = {
@@ -472,6 +496,15 @@ sc_quest_resolve_options(struct scrcpy_options *opts) {
         opts->video_codec = params.codec;
     }
 
+    if (opts->video_codec == SC_CODEC_H265 && !opts->max_size) {
+        // The display is 4128 pixels wide, but H.265 hardware encoders are
+        // typically limited to 4096 (otherwise, the encoding fails and the
+        // device retries with a much lower size)
+        LOGI("Quest: limiting the video size to 4096 for H.265 "
+             "(use --max-size to change it)");
+        opts->max_size = 4096;
+    }
+
     // The actual values (displayed, and saved once they are known to work)
     opts->quest_params.bit_rate = opts->video_bit_rate;
     opts->quest_params.codec = opts->video_codec;
@@ -831,6 +864,11 @@ sc_quest_configure(struct sc_quest *q, int src_w, int src_h) {
 
     if (q->ov != g.ov) {
         q->seam_valid = false;
+    }
+
+    if (q->src_w != src_w || q->src_h != src_h) {
+        // The device may downsize the video if its encoder fails
+        LOGI("Quest input: %dx%d", src_w, src_h);
     }
 
     q->src_w = src_w;
@@ -1363,6 +1401,10 @@ remap_band(void *arg, unsigned band, unsigned nbands) {
 const AVFrame *
 sc_quest_process(struct sc_quest *q, const AVFrame *frame) {
     if (!q->processing) {
+        if (q->overlay
+                && sc_tick_now() - q->overlay_date >= SC_TICK_FROM_SEC(1)) {
+            q->overlay_dirty = true;
+        }
         return frame;
     }
 
@@ -1399,6 +1441,7 @@ sc_quest_process(struct sc_quest *q, const AVFrame *frame) {
     out->pts = frame->pts;
 
     sc_tick now = sc_tick_now();
+    q->process_us += now - start;
     q->last_ms = (now - start) / 1000.f;
     q->avg_ms = q->avg_ms ? q->avg_ms * .95f + q->last_ms * .05f : q->last_ms;
 
@@ -1423,6 +1466,9 @@ sc_quest_is_key(SDL_Scancode scancode) {
         case SDL_SCANCODE_6:
         case SDL_SCANCODE_Q:
         case SDL_SCANCODE_H:
+        case SDL_SCANCODE_F:
+        case SDL_SCANCODE_M:
+        case SDL_SCANCODE_P:
         case SDL_SCANCODE_7:
         case SDL_SCANCODE_8:
         case SDL_SCANCODE_9:
@@ -1508,6 +1554,10 @@ sc_quest_handle_key(struct sc_quest *q, SDL_Scancode scancode, bool shift) {
             q->overlay_dirty = true;
             return true;
         }
+        case SDL_SCANCODE_P:
+            q->perf = !q->perf;
+            q->overlay_dirty = true;
+            return true;
         case SDL_SCANCODE_H:
             q->restart_codec = q->restart_codec == SC_CODEC_H264
                              ? SC_CODEC_H265 : SC_CODEC_H264;
@@ -1732,6 +1782,79 @@ render_text(const char *text, int *out_w, int *out_h) {
     return pixels;
 }
 
+// Compute the performance values since the last update
+static void
+sc_quest_update_perf(struct sc_quest *q) {
+    struct sc_quest_stats *stats = &sc_quest_stats;
+    sc_tick now = sc_tick_now();
+
+    uint64_t video_bytes =
+        atomic_load_explicit(&stats->video_bytes, memory_order_relaxed);
+    uint64_t decoded_frames =
+        atomic_load_explicit(&stats->decoded_frames, memory_order_relaxed);
+    uint64_t decode_us =
+        atomic_load_explicit(&stats->decode_us, memory_order_relaxed);
+    uint64_t skipped_frames =
+        atomic_load_explicit(&stats->skipped_frames, memory_order_relaxed);
+    uint64_t delay_us =
+        atomic_load_explicit(&stats->delay_us, memory_order_relaxed);
+
+    sc_tick elapsed = now - q->perf_last.date;
+    if (q->perf_last.date && elapsed < SC_TICK_FROM_MS(500)) {
+        // Too early, keep the previous values
+        return;
+    }
+
+    if (q->perf_last.date) {
+        float seconds = elapsed / 1000000.f;
+        uint64_t decoded = decoded_frames - q->perf_last.decoded_frames;
+        uint64_t shown = q->shown_frames - q->perf_last.shown_frames;
+        uint64_t skipped = skipped_frames - q->perf_last.skipped_frames;
+
+        q->rate_mbps = (video_bytes - q->perf_last.video_bytes) * 8.f
+                     / elapsed;
+        float decode_ms = decoded
+                        ? (decode_us - q->perf_last.decode_us) / 1000.f
+                                / decoded
+                        : 0;
+        float delay_ms = decoded
+                       ? (delay_us - q->perf_last.delay_us) / 1000.f / decoded
+                       : 0;
+        float process_ms = shown
+                         ? (q->process_us - q->perf_last.process_us) / 1000.f
+                                / shown
+                         : 0;
+        // The drawing duration includes the processing
+        float draw_ms = shown
+                      ? (q->draw_us - q->perf_last.draw_us) / 1000.f / shown
+                      : 0;
+
+        snprintf(q->perf_text, sizeof(q->perf_text),
+                 "PERF  DECODE %.1f MS  QUEST %.1f MS  DRAW %.1f MS  "
+                 "FPS %.0f DECODED / %.0f SHOWN / %.0f SKIPPED  "
+                 "DELAY +%.0f MS  INPUT %dX%d",
+                 decode_ms, process_ms, draw_ms, decoded / seconds,
+                 shown / seconds, skipped / seconds, delay_ms, q->src_w,
+                 q->src_h);
+
+        if (q->perf) {
+            printf("[quest] %s  %s %.1f MBPS\n", q->perf_text,
+                   codec_name(q->params.codec), q->rate_mbps);
+            fflush(stdout);
+        }
+    }
+
+    q->perf_last.date = now;
+    q->perf_last.video_bytes = video_bytes;
+    q->perf_last.decoded_frames = decoded_frames;
+    q->perf_last.decode_us = decode_us;
+    q->perf_last.skipped_frames = skipped_frames;
+    q->perf_last.delay_us = delay_us;
+    q->perf_last.shown_frames = q->shown_frames;
+    q->perf_last.draw_us = q->draw_us;
+    q->perf_last.process_us = q->process_us;
+}
+
 uint32_t *
 sc_quest_render_overlay(struct sc_quest *q, int *w, int *h) {
     if (!q->overlay) {
@@ -1742,31 +1865,22 @@ sc_quest_render_overlay(struct sc_quest *q, int *w, int *h) {
 
     const struct sc_quest_params *p = &q->params;
 
-    // Actual video bit rate since the last overlay update
-    uint64_t bytes = atomic_load_explicit(&sc_quest_video_bytes,
-                                          memory_order_relaxed);
-    if (q->rate_date && q->overlay_date > q->rate_date + SC_TICK_FROM_MS(500)) {
-        q->rate_mbps = (bytes - q->rate_bytes) * 8.f
-                     / (q->overlay_date - q->rate_date);
-        q->rate_bytes = bytes;
-        q->rate_date = q->overlay_date;
-    } else if (!q->rate_date) {
-        q->rate_bytes = bytes;
-        q->rate_date = q->overlay_date;
-    }
+    sc_quest_update_perf(q);
 
-    char quality[96];
+    // Software decoding of H.265 is slower (it adds latency)
+    char quality[112];
     if (q->restarting || q->restart_pending) {
-        snprintf(quality, sizeof(quality), "QUALITY %uM %s - RESTARTING...",
+        snprintf(quality, sizeof(quality), "QUALITY %uM %s%s - RESTARTING...",
                  (unsigned) (q->restart_bit_rate / 1000000),
-                 codec_name(q->restart_codec));
+                 codec_name(q->restart_codec),
+                 q->restart_codec == SC_CODEC_H264 ? "" : " (SLOWER)");
     } else {
-        snprintf(quality, sizeof(quality), "QUALITY %uM %s (ACTUAL %.1fM)",
+        snprintf(quality, sizeof(quality), "QUALITY %uM %s%s (ACTUAL %.1fM)",
                  (unsigned) (p->bit_rate / 1000000), codec_name(p->codec),
-                 q->rate_mbps);
+                 p->codec == SC_CODEC_H264 ? "" : " (SLOWER)", q->rate_mbps);
     }
 
-    char text[640];
+    char text[832];
     if (q->processing) {
         char mode[64];
         if (p->eye == SC_QUEST_EYE_BOTH) {
@@ -1784,13 +1898,17 @@ sc_quest_render_overlay(struct sc_quest *q, int *w, int *h) {
                  "1-4 VIEW  5 EYE  6 SEAM MODE  7 NEW SEAM  8 9 MOVE SEAM"
                  "  Q QUALITY  H CODEC\n"
                  "[ ] ANGLE  - = K1  ; ' K2  , . OVERLAP  \\ RAW"
-                 "  0 DEFAULTS  / HIDE",
+                 "  F FULLSCREEN  M FILL SCREEN  P PERF  0 DEFAULTS  / HIDE"
+                 "%s%s",
                  'A' + p->preset, mode, q->crop.w, q->crop.h, q->avg_ms,
-                 p->angle, p->k1, p->k2, p->ovfrac, quality);
+                 p->angle, p->k1, p->k2, p->ovfrac, quality,
+                 q->perf ? "\n" : "", q->perf ? q->perf_text : "");
     } else {
         snprintf(text, sizeof(text),
                  "QUEST RAW BUFFER (PROCESSING OFF)  %s\n"
-                 "\\ PROCESS  Q QUALITY  H CODEC  / HIDE", quality);
+                 "\\ PROCESS  Q QUALITY  H CODEC  F FULLSCREEN  P PERF"
+                 "  / HIDE%s%s", quality,
+                 q->perf ? "\n" : "", q->perf ? q->perf_text : "");
     }
 
     return render_text(text, w, h);

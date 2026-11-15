@@ -397,6 +397,7 @@ struct scrcpy_options {
     bool quest;
     struct sc_quest_params quest_params;
     uint16_t quest_set; // OR of SC_QUEST_SET_* (set on the command line)
+    bool quest_perf; // show the performance line on start
     bool quest_config; // load/save the parameters from/to the config file
 };
 

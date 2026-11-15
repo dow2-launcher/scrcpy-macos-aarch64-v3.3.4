@@ -251,8 +251,8 @@ run_demuxer(void *data) {
 
         if (codec_ctx->codec_type == AVMEDIA_TYPE_VIDEO) {
             // To report the actual video bit rate in Meta Quest viewing mode
-            atomic_fetch_add_explicit(&sc_quest_video_bytes, packet->size,
-                                      memory_order_relaxed);
+            atomic_fetch_add_explicit(&sc_quest_stats.video_bytes,
+                                      packet->size, memory_order_relaxed);
         }
 
         if (must_merge_config_packet) {

@@ -42,8 +42,25 @@
 // Delay between the last quality key press and the restart
 #define SC_QUEST_RESTART_DELAY_MS 1200
 
-// Number of bytes of video packets received (to report the actual bit rate)
-extern atomic_uint_least64_t sc_quest_video_bytes;
+// Counters updated by the demuxer/decoder/screen threads, to report the
+// actual bit rate and the performances
+struct sc_quest_stats {
+    atomic_uint_least64_t video_bytes; // video packets received
+    atomic_uint_least64_t decoded_frames;
+    atomic_uint_least64_t decode_us; // total decoding duration
+    atomic_uint_least64_t skipped_frames; // decoded but never displayed
+    // Sum of (decoded date - PTS) for all the frames, relative to the minimum
+    // value seen: additional delay compared to the "best" frame
+    atomic_uint_least64_t delay_us;
+    atomic_int_least64_t delay_min;
+    atomic_bool has_delay_min;
+};
+
+extern struct sc_quest_stats sc_quest_stats;
+
+// To be called by the video decoder for every decoded frame
+void
+sc_quest_stats_on_frame(int64_t pts, sc_tick decode_duration, sc_tick now);
 
 struct sc_quest_pool {
     sc_mutex mutex;
@@ -120,10 +137,24 @@ struct sc_quest {
 
     bool first_frame_done;
 
-    // actual video bit rate
-    uint64_t rate_bytes;
-    sc_tick rate_date;
-    float rate_mbps;
+    // Performance line
+    bool perf; // show it in the overlay and print it to the console
+    struct {
+        sc_tick date;
+        uint64_t video_bytes;
+        uint64_t decoded_frames;
+        uint64_t decode_us;
+        uint64_t skipped_frames;
+        uint64_t delay_us;
+        uint64_t shown_frames;
+        uint64_t draw_us;
+        uint64_t process_us;
+    } perf_last; // counters on the last update
+    uint64_t shown_frames;
+    uint64_t draw_us;
+    uint64_t process_us;
+    float rate_mbps; // actual video bit rate
+    char perf_text[160];
 
     // stats
     float last_ms; // duration of the processing of the last frame
@@ -160,6 +191,13 @@ sc_quest_request_restart(struct sc_quest *q, bool fullscreen, int x, int y,
 // requested). Return only if no restart is requested or on error.
 void
 sc_quest_restart_exec(int argc, char *argv[]);
+
+// To be called after a new frame has been displayed
+static inline void
+sc_quest_report_draw(struct sc_quest *q, sc_tick duration) {
+    ++q->shown_frames;
+    q->draw_us += duration;
+}
 
 // Save the current parameters to the config file (if enabled)
 void

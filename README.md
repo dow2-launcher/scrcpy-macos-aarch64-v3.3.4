@@ -56,7 +56,10 @@ bigger steps.
 | <kbd>;</kbd> <kbd>'</kbd>    | Lens correction `k2` ∓0.01                              |
 | <kbd>,</kbd> <kbd>.</kbd>    | Eyes overlap `ovfrac` ∓0.002 (doubled or torn seam)     |
 | <kbd>Q</kbd> / <kbd>Shift</kbd>+<kbd>Q</kbd> | Video quality: next / previous bit rate (16, 40, 80, 120, 200 Mbps) |
-| <kbd>H</kbd>                 | Video codec: H.264 ↔ H.265                              |
+| <kbd>H</kbd>                 | Video codec: H.264 ↔ H.265 (H.265 is decoded in software: slower, adds latency) |
+| <kbd>F</kbd>                 | Toggle fullscreen                                       |
+| <kbd>M</kbd>                 | Resize the window to fill the screen                    |
+| <kbd>P</kbd>                 | Toggle the performance line (also printed to the terminal every second) |
 | <kbd>\</kbd>                | Toggle processing (show the raw buffer)                 |
 | <kbd>/</kbd>                 | Toggle the text overlay (current values)                |
 | <kbd>0</kbd>                 | Reset everything to the default values                  |
@@ -89,6 +92,29 @@ quality is remembered only once a picture has been received with it: if the
 headset encoder rejects a setting (for example H.265), scrcpy exits and the
 next run uses the previous working values.
 
+**Latency.** Keep **H.264** (the default): on a Mac, H.265 is decoded in
+software (the static build has no hardware decoding), which is too slow for
+this picture size and adds a clearly visible delay; the overlay marks it
+`(SLOWER)`. Moreover, the Quest H.265 encoder rejects the full 4128-pixel
+width, so with H.265 the size is limited to 4096 (`--max-size` to change);
+when an encoder fails, the headset silently retries with a much smaller
+picture: the actual size is logged (`Quest input: WxH`) and shown in the
+performance line.
+
+**Performance line** (<kbd>P</kbd> or `--quest-perf`):
+`DECODE` (ms per frame in the video decoder), `QUEST` (processing), `DRAW`
+(processing + texture upload + rendering), `FPS` decoded / shown / skipped
+(decoded but replaced by a newer frame before being shown), `DELAY` and
+`INPUT` (decoded picture size). `DELAY` is only an **estimate** of the
+additional stream delay: the time between the capture timestamp set by the
+headset and the end of decoding, minus the smallest value seen since the
+start. It shows how much later than the best frame the pictures arrive
+(network or decoding backlog), not the absolute latency.
+
+**Bigger picture.** The window can be resized freely, <kbd>M</kbd> makes it
+fill the screen and <kbd>F</kbd> switches to fullscreen; the picture is
+scaled with linear filtering. The source has no more pixels than the preset
+size shown in the overlay, so a bigger window is smoother, not more detailed.
 If the picture looks rough when the window is much smaller than the video,
 try `--render-driver=opengl` (enables trilinear filtering).
 
@@ -179,7 +205,10 @@ Quest 3 (два «рыбьих глаза» рядом, с наклоном па
 | <kbd>;</kbd> <kbd>'</kbd>    | Распрямление `k2` ∓0.01                                 |
 | <kbd>,</kbd> <kbd>.</kbd>    | Перекрытие глаз `ovfrac` ∓0.002 (шов двоит или расходится) |
 | <kbd>Q</kbd> / <kbd>Shift</kbd>+<kbd>Q</kbd> | Качество видео: следующий / предыдущий битрейт (16, 40, 80, 120, 200 Мбит/с) |
-| <kbd>H</kbd>                 | Кодек: H.264 ↔ H.265                                    |
+| <kbd>H</kbd>                 | Кодек: H.264 ↔ H.265 (H.265 декодируется программно: медленнее, добавляет задержку) |
+| <kbd>F</kbd>                 | Полный экран                                            |
+| <kbd>M</kbd>                 | Растянуть окно на весь экран                            |
+| <kbd>P</kbd>                 | Строка производительности (также раз в секунду печатается в терминал) |
 | <kbd>\</kbd>                | Вкл/выкл обработку (показать сырой буфер)               |
 | <kbd>/</kbd>                 | Показать/скрыть строку с текущими значениями            |
 | <kbd>0</kbd>                 | Сбросить всё к значениям по умолчанию                   |
@@ -212,8 +241,32 @@ Quest 3 (два «рыбьих глаза» рядом, с наклоном па
 принял настройку (например, H.265), scrcpy завершится, а следующий запуск
 возьмёт прежние рабочие значения.
 
-Если картинка грубая, когда окно намного меньше видео, попробуйте
-`--render-driver=opengl` (включает трилинейную фильтрацию).
+**Задержка.** Оставляйте **H.264** (по умолчанию): на Mac H.265 декодируется
+программно (в статической сборке нет аппаратного декодирования), для такого
+размера кадра это слишком медленно и даёт заметную задержку; в строке значений
+он помечен `(SLOWER)`. Кроме того, кодировщик H.265 в Quest не принимает
+полную ширину 4128 пикселей, поэтому с H.265 размер ограничивается 4096
+(меняется через `--max-size`); если кодировщик не справился, шлем молча
+повторяет с намного меньшей картинкой: реальный размер пишется в лог
+(`Quest input: WxH`) и виден в строке производительности.
+
+**Строка производительности** (<kbd>P</kbd> или `--quest-perf`):
+`DECODE` (мс на кадр в декодере), `QUEST` (обработка), `DRAW` (обработка +
+загрузка текстуры + отрисовка), `FPS` декодировано / показано / пропущено
+(декодирован, но заменён более новым кадром до показа), `DELAY` и `INPUT`
+(размер декодированного кадра). `DELAY` — только **оценка** добавочной
+задержки потока: время от метки захвата, поставленной шлемом, до конца
+декодирования, минус наименьшее значение с начала сеанса. Она показывает,
+насколько кадры приходят позже лучшего кадра (сеть или очередь декодера), а
+не абсолютную задержку.
+
+**Картинка крупнее.** Окно можно свободно растягивать, <kbd>M</kbd>
+разворачивает его на весь экран, <kbd>F</kbd> включает полноэкранный режим;
+картинка масштабируется с линейной фильтрацией. В источнике не больше
+пикселей, чем размер пресета в строке значений, поэтому в большом окне
+картинка глаже, но не детальнее. Если картинка грубая, когда окно намного
+меньше видео, попробуйте `--render-driver=opengl` (включает трилинейную
+фильтрацию).
 
 **Последние значения запоминаются**: при каждом изменении они сохраняются в
 `~/.config/scrcpy-quest.conf` и подхватываются при следующем запуске (опции

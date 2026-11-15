@@ -473,7 +473,9 @@ The parameters can be adjusted live from the window: 1/2/3/4 select the view pre
 
 The last values are saved to ~/.config/scrcpy\-quest.conf and restored on the next run (the command line options take precedence). On every change, the equivalent command line is printed to the console.
 
-In this mode, the default video bit rate is 80M (instead of 8M). The video quality can be changed from the window: Q and Shift+Q select the next/previous bit rate (16M, 40M, 80M, 120M, 200M), H toggles the codec (h264/h265). The mirroring is restarted to apply the new encoding parameters (they are remembered too).
+In this mode, the default video bit rate is 80M (instead of 8M). The video quality can be changed from the window: Q and Shift+Q select the next/previous bit rate (16M, 40M, 80M, 120M, 200M), H toggles the codec (h264/h265; h265 is decoded more slowly, so it adds latency). The mirroring is restarted to apply the new encoding parameters (they are remembered too).
+
+F toggles fullscreen, M resizes the window to fill the screen, P toggles the performance line.
 
 Mouse and touch events are not forwarded in this mode.
 
@@ -512,6 +514,10 @@ Do not load or save the \fB\-\-quest\fR parameters from/to the config file (~/.c
 Set the initial overlap between the two eyes for \fB\-\-quest\fR, as a fraction of the eye width (between 0.5 and 0.98).
 
 Default is 0.844.
+
+.TP
+.B \-\-quest\-perf
+Show the performance line in the \fB\-\-quest\fR overlay on start (decoding, processing and drawing durations, frame rates, estimated additional stream delay), and print it to the console every second. It can be toggled by pressing P.
 
 .TP
 .BI "\-\-quest\-preset " value

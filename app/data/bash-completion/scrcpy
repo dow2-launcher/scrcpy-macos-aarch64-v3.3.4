@@ -78,6 +78,7 @@ _scrcpy() {
         --quest-k2=
         --quest-no-config
         --quest-ovfrac=
+        --quest-perf
         --quest-preset=
         --quest-seam=
         --quest-seam-x=

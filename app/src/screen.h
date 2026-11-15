@@ -111,6 +111,7 @@ struct sc_screen_params {
     struct sc_quest_params quest_params;
     uint16_t quest_set;
     bool quest_config;
+    bool quest_perf;
 };
 
 // initialize screen, create window, renderer and texture (window is hidden)

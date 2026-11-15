@@ -310,6 +310,8 @@ sc_screen_frame_sink_push(struct sc_frame_sink *sink, const AVFrame *frame) {
     }
 
     if (previous_skipped) {
+        atomic_fetch_add_explicit(&sc_quest_stats.skipped_frames, 1,
+                                  memory_order_relaxed);
         sc_fps_counter_add_skipped_frame(&screen->fps_counter);
         // The SC_EVENT_NEW_FRAME triggered for the previous frame will consume
         // this new frame instead
@@ -440,6 +442,7 @@ sc_screen_init(struct sc_screen *screen,
             goto error_destroy_display;
         }
         screen->quest_enabled = true;
+        screen->quest.perf = params->quest_perf;
         if (SDL_InitSubSystem(SDL_INIT_TIMER)) {
             LOGW("Could not initialize SDL timer: %s", SDL_GetError());
         }
@@ -714,6 +717,8 @@ sc_screen_apply_frame(struct sc_screen *screen, bool new_frame) {
         sc_screen_update_quest_overlay(screen);
     }
 
+    sc_tick draw_start = sc_tick_now();
+
     struct sc_size new_frame_size = {frame->width, frame->height};
     enum sc_display_result res = prepare_for_frame(screen, new_frame_size);
     if (res == SC_DISPLAY_RESULT_ERROR) {
@@ -745,6 +750,11 @@ sc_screen_apply_frame(struct sc_screen *screen, bool new_frame) {
     }
 
     sc_screen_render(screen, false);
+
+    if (screen->quest_enabled && new_frame) {
+        sc_quest_report_draw(&screen->quest, sc_tick_now() - draw_start);
+    }
+
     return true;
 }
 
@@ -864,6 +874,26 @@ sc_screen_resize_to_pixel_perfect(struct sc_screen *screen) {
                                             content_size.height);
 }
 
+// Resize the window to the biggest size fitting the display
+static void
+sc_screen_quest_fill_display(struct sc_screen *screen) {
+    if (screen->fullscreen || screen->maximized || screen->minimized) {
+        return;
+    }
+
+    struct sc_size bounds;
+    if (!get_preferred_display_bounds(&bounds)) {
+        return;
+    }
+
+    struct sc_size size =
+        get_optimal_size(bounds, screen->content_size, false);
+    SDL_SetWindowSize(screen->window, size.width, size.height);
+    SDL_SetWindowPosition(screen->window, SDL_WINDOWPOS_CENTERED,
+                          SDL_WINDOWPOS_CENTERED);
+    LOGI("Window resized to %ux%u", size.width, size.height);
+}
+
 static uint32_t
 quest_restart_timer(uint32_t interval, void *userdata) {
     (void) interval;
@@ -905,6 +935,16 @@ void
 sc_screen_quest_handle_key(struct sc_screen *screen, SDL_Scancode scancode,
                            bool shift) {
     if (!screen->quest_enabled) {
+        return;
+    }
+
+    if (scancode == SDL_SCANCODE_F) {
+        sc_screen_toggle_fullscreen(screen);
+        return;
+    }
+
+    if (scancode == SDL_SCANCODE_M) {
+        sc_screen_quest_fill_display(screen);
         return;
     }
 

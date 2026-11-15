@@ -116,6 +116,7 @@ const struct scrcpy_options scrcpy_options_default = {
     .quest = false,
     .quest_params = SC_QUEST_PARAMS_DEFAULT,
     .quest_set = 0,
+    .quest_perf = false,
     .quest_config = true,
 };
 

@@ -4,7 +4,9 @@
 #include <libavcodec/packet.h>
 #include <libavutil/avutil.h>
 
+#include "quest.h"
 #include "util/log.h"
+#include "util/tick.h"
 
 /** Downcast packet_sink to decoder */
 #define DOWNCAST(SINK) container_of(SINK, struct sc_decoder, packet_sink)
@@ -41,6 +43,9 @@ sc_decoder_push(struct sc_decoder *decoder, const AVPacket *packet) {
         return true;
     }
 
+    bool is_video = decoder->ctx->codec_type == AVMEDIA_TYPE_VIDEO;
+    sc_tick start = is_video ? sc_tick_now() : 0;
+
     int ret = avcodec_send_packet(decoder->ctx, packet);
     if (ret < 0 && ret != AVERROR(EAGAIN)) {
         LOGE("Decoder '%s': could not send video packet: %d",
@@ -61,6 +66,13 @@ sc_decoder_push(struct sc_decoder *decoder, const AVPacket *packet) {
         }
 
         // a frame was received
+        if (is_video) {
+            // For the performance line of the Meta Quest viewing mode
+            sc_tick now = sc_tick_now();
+            sc_quest_stats_on_frame(decoder->frame->pts, now - start, now);
+            start = now;
+        }
+
         bool ok = sc_frame_source_sinks_push(&decoder->frame_source,
                                              decoder->frame);
         av_frame_unref(decoder->frame);

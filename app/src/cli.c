@@ -124,6 +124,7 @@ enum {
     OPT_QUEST_SEAM,
     OPT_QUEST_NO_CONFIG,
     OPT_QUEST_SEAM_X,
+    OPT_QUEST_PERF,
 };
 
 struct sc_option {
@@ -828,9 +829,12 @@ static const struct sc_option options[] = {
                 "In this mode, the default video bit rate is 80M (instead of "
                 "8M). The video quality can be changed from the window: Q "
                 "and Shift+Q select the next/previous bit rate (16M, 40M, "
-                "80M, 120M, 200M), H toggles the codec (h264/h265). The "
-                "mirroring is restarted to apply the new encoding parameters "
-                "(they are remembered too).\n"
+                "80M, 120M, 200M), H toggles the codec (h264/h265; h265 is "
+                "decoded more slowly, so it adds latency). The mirroring is "
+                "restarted to apply the new encoding parameters (they are "
+                "remembered too).\n"
+                "F toggles fullscreen, M resizes the window to fill the "
+                "screen, P toggles the performance line.\n"
                 "Mouse and touch events are not forwarded in this mode.",
     },
     {
@@ -849,6 +853,14 @@ static const struct sc_option options[] = {
         .text = "Do not load or save the --quest parameters from/to the "
                 "config file (~/.config/scrcpy-quest.conf, or the path given "
                 "by the environment variable SCRCPY_QUEST_CONFIG).",
+    },
+    {
+        .longopt_id = OPT_QUEST_PERF,
+        .longopt = "quest-perf",
+        .text = "Show the performance line in the --quest overlay on start "
+                "(decoding, processing and drawing durations, frame rates, "
+                "estimated additional stream delay), and print it to the "
+                "console every second. It can be toggled by pressing P.",
     },
     {
         .longopt_id = OPT_QUEST_SEAM,
@@ -2815,6 +2827,10 @@ parse_args_with_getopt(struct scrcpy_cli_args *args, int argc, char *argv[],
                     return false;
                 }
                 opts->quest_set |= SC_QUEST_SET_SEAM_X;
+                opts->quest = true;
+                break;
+            case OPT_QUEST_PERF:
+                opts->quest_perf = true;
                 opts->quest = true;
                 break;
             case OPT_QUEST_NO_CONFIG:
